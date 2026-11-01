@@ -20,22 +20,46 @@
 // for), `open` (a file it's opened with, which it may then read, or a link).
 
 import { View, div, image, PathBuilder } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, VirtualListScrollHandle, v_virtual_list, Scrollbar } from "gpui-base";
 import { exec, hc, home, appHome, props, theme, settings, run, readTextFile, writeTextFile, panes, focused, spaces } from "herdr";
+import * as herdr from "herdr";
 import net from "net";
 import { randomBytes } from "crypto";
 import { Buffer } from "buffer";
 
-/** The app's zoom (settings `zoom`): it scales every length a script writes, but the
- *  sizes and positions it reports (size changes, pointer events, wheel deltas) and a
- *  path's points come unscaled. What it reports is divided by this, and path points
- *  multiplied, so everything here (and in the protocol) is in the script's own pixels. */
+/** The app draws WASM mods itself (`herdr.wasmView()`, 1 or more: `WasmViewState` and
+ *  `WasmView` in "herdr-components", with `lost()` and `connect(port, token)`): the pane
+ *  is then handed to it. Checked without importing anything, so on an app without it
+ *  nothing waits and this script draws, as it always does. */
+const NATIVE_VIEW = typeof herdr.wasmView === "function" && Number(herdr.wasmView()) >= 1;
+
+/** The app's zoom (settings `zoom`): it scales every length a script writes (a path's
+ *  points and a list's item sizes too), but the sizes and positions it reports (size
+ *  changes, pointer events, wheel deltas) come unscaled. What it reports is divided by
+ *  this, so everything here (and in the protocol) is in the script's own pixels. */
 function uiZoom() {
   const z = Number(settings()?.zoom);
   return z > 0 ? z : 1;
 }
 /** A reported point or size in the script's pixels. */
 const unzoomed = (p) => { const z = uiZoom(); return p && { x: p.x / z, y: p.y / z }; };
+
+/** Tab and Shift+Tab, as this mod's own actions while its view has the keyboard: the
+ *  shell binds them to moving the keyboard on (a binding wins over a key handler, so
+ *  the view's never heard them); a binding in the view's own context comes first. */
+const KEY_CONTEXT = "WasmMods";
+function bindTab(cx) {
+  if (globalThis.__wasmModsTabBound) return;
+  try {
+    cx.bind_keys([
+      { keystroke: "tab", action: "wasm-mods::tab", context: KEY_CONTEXT },
+      { keystroke: "shift-tab", action: "wasm-mods::tab-back", context: KEY_CONTEXT },
+    ]);
+    globalThis.__wasmModsTabBound = true;
+  } catch (e) {
+    console.warn(`wasm-mods: no Tab binding: ${e?.message ?? e}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // The core: hosts, modules and the lock
@@ -652,7 +676,7 @@ function findFieldsAndLists(ui) {
       fields.push(v);
     } else if (type === "List") {
       const virtual = Boolean(v.window);
-      lists.push({ id: v.id, selected: v.selected, count: virtual ? Number(v.window.total) || 0 : v.items.length, keyboard: Boolean(v.keyboard), virtual });
+      lists.push({ id: v.id, selected: v.selected, count: virtual ? Number(v.window.total) || 0 : v.items.length, keyboard: Boolean(v.keyboard), virtual, pages: virtual && Boolean(v.pages) });
       v.items.forEach((it) => walk(it.child));
     } else if (type === "Column" || type === "Row") {
       v.children.forEach(walk);
@@ -695,6 +719,7 @@ export class WasmView extends View {
     // Once: a second init would open a second connection.
     if (this.inited) return;
     this.inited = true;
+    bindTab(cx);
     // This copy's props, read here once: `props()` after an await may answer for
     // another mod's scope (another copy's: a diff opened for a commit showed the
     // uncommitted changes, having read a copy's props without its arg).
@@ -719,12 +744,109 @@ export class WasmView extends View {
     this.fieldFocused = false;
     this.canvases = new Map(); // canvas id → {w, h, view, moved, reset, down}
     this.focus = cx.focus_handle();
+    if (this.module && NATIVE_VIEW) this.watchNative(cx);
     if (this.module) cx.spawn(async (cx) => this.connect(cx));
   }
 
   async close() {
     this.closed = true;
+    this.stopNativeTick();
     this.sock?.close();
+  }
+
+  // ----- the app's own view (only where `herdr.wasmView()` says it has one)
+
+  /** The native view's state is made from a timer: it runs in this copy's own scope,
+   *  while what follows an await may run in another mod's (a menu closing as this
+   *  opens), which would own the state and drop it with itself. The timer then watches
+   *  the view's connection: a lost host is found again (or another started) here, where
+   *  hosts are known, and the view connected to it. "focus" from the app gives the keys
+   *  to the view. Props `native: false` keep this script's drawing. */
+  watchNative(cx) {
+    if (this.props.native === false) return;
+    this.nativeTick = cx.timer.every(20, (cx) => {
+      if (this.pendingNative) {
+        const make = this.pendingNative;
+        this.pendingNative = null;
+        make();
+        cx.notify();
+      }
+      const state = this.native?.state;
+      if (!state) return;
+      if (this.pendingFocus) {
+        this.pendingFocus = false;
+        if (typeof state.focus === "function") state.focus();
+      }
+      if (this.pendingConnect) {
+        const { port, token } = this.pendingConnect;
+        this.pendingConnect = null;
+        state.connect(port, token);
+        return;
+      }
+      // Looked at every 100 ms or so; nothing to do while it's connected.
+      if (this.findingHost || (this.lostTicks = ((this.lostTicks ?? 0) + 1) % 5) !== 0) return;
+      const lost = state.lost();
+      if (!lost) return;
+      this.findingHost = true;
+      cx.spawn(async (cx) => {
+        try {
+          this.pendingConnect = await this.hostAgain(cx, lost);
+        } catch (e) {
+          console.warn(`wasm-mods: ${this.module}: ${e?.message ?? e}`);
+          await delay(cx, 1000);
+        } finally {
+          this.findingHost = false;
+        }
+      });
+    });
+    if (typeof herdr.nextCommand === "function") {
+      cx.spawn(async (cx) => {
+        while (!this.closed) {
+          const command = await herdr.nextCommand();
+          if (this.closed) return;
+          if (command !== "focus") continue;
+          if (this.native || this.pendingNative) this.pendingFocus = true;
+          else this.focus.focus();
+          cx.notify();
+        }
+      });
+    }
+  }
+
+  /** Hands the pane to the app's view, which connects to the host and draws the module
+   *  itself. False when there's none (this script draws). */
+  async goNative(cx, port, token) {
+    if (!this.nativeTick) return false;
+    const native = await import("herdr-components").catch(() => null);
+    if (!native?.WasmViewState || !native.WasmView) {
+      this.stopNativeTick();
+      return false;
+    }
+    const p = this.props;
+    const json = JSON.stringify({
+      module: this.hostName ?? this.module, arg: p.arg ?? null, open: p.open ?? null,
+      port, token, images: IMAGE_DIR(), pane: p.pane ?? null, folder: p.folder ?? null,
+    });
+    // Made on the next tick (see watchNative).
+    this.pendingNative = () => {
+      this.native = { WasmView: native.WasmView, state: native.WasmViewState(json) };
+      this.status = null;
+    };
+    return true;
+  }
+
+  stopNativeTick() {
+    this.nativeTick?.cancel();
+    this.nativeTick = null;
+  }
+
+  /** The native view lost its host ({port, why}): where to connect it now. A host that
+   *  can't be reached is forgotten (and another started); one that only closed this
+   *  connection is tried again first, as the connection here would be. */
+  async hostAgain(cx, lost) {
+    await delay(cx, 300);
+    if (/can't reach/.test(lost.why)) await forgetHost(lost.port);
+    return ensureHost(cx, this.protocol, this.folder);
   }
 
   // ----- the connection
@@ -764,6 +886,7 @@ export class WasmView extends View {
         return;
       }
       const { port, token } = got;
+      if (tries === 0 && (await this.goNative(cx, port, token))) return;
       try {
         this.sock = await net.connect("127.0.0.1", port);
         this.port = port;
@@ -787,6 +910,8 @@ export class WasmView extends View {
       this.sendTheme();
       this.sentWindow = "";
       this.sendWindow();
+      this.sentFocused = null;
+      this.sendFocused();
       if (this.size) this.send({ size: this.size });
       await this.readLoop(cx);
     } catch (e) {
@@ -829,6 +954,17 @@ export class WasmView extends View {
     this.send({ window: JSON.parse(json) });
   }
 
+  /** Whether this copy's pane has the keyboard (Input.focused): Herdr's focused pane, or
+   *  (outside a pane of its own) this view's focus. Sent when it changes. */
+  sendFocused() {
+    if (!this.connected()) return;
+    const pane = this.props.pane;
+    const now = pane ? focused()?.pane === pane : this.focus.is_focused();
+    if (now === this.sentFocused) return;
+    this.sentFocused = now;
+    this.send({ focused: now });
+  }
+
   sendTheme() {
     const json = JSON.stringify(protocolTheme(theme()));
     if (json === this.sentTheme || !this.connected()) return;
@@ -839,6 +975,8 @@ export class WasmView extends View {
   /** Events in the protocol's form; `seq` times the round trip. `m`: GPUI modifiers. */
   sendEvents(events, m) {
     if (!events.length && !this.held?.size) return;
+    // Input here means its pane has the keyboard: say so first.
+    this.sendFocused();
     // Moves and views while the module hasn't answered yet: only the latest of each is
     // sent, with its answer (the app would otherwise draw a frame for every one, falling
     // ever further behind).
@@ -924,7 +1062,8 @@ export class WasmView extends View {
       // Its own mod folder if it has one (wasm-diff), else the core mod runs it.
       const own = `wasm-${msg.open.module.replace(/_/g, "-")}`;
       exec("test", ["-f", `${MOD_DIR(own)}/mod.json`]).then((r) => r.code === 0).catch(() => false).then((has) => {
-        run("tab.new", has ? { space, mod: own, props: extra } : { space, mod: "wasm-mods", props: { module: msg.open.module, ...extra } });
+        const name = msg.open.module.replace(/_/g, " ");
+        run("tab.new", has ? { space, name, mod: own, props: extra } : { space, name, mod: "wasm-mods", props: { module: msg.open.module, ...extra } });
       });
     } else if (msg.open_url) {
       exec("xdg-open", [msg.open_url.url]);
@@ -983,11 +1122,43 @@ export class WasmView extends View {
     // the graph) no longer takes keys. Its scroll handle stays: back, the list is
     // where it was.
     const listed = new Set(lists.map((v) => v.id));
+    // The module's page (Node::List pages): PgUp/PgDn and Home/End scroll it.
+    this.pageList = lists.find((v) => v.pages)?.id ?? null;
     for (const id of [...this.lists.keys()]) if (!listed.has(id)) this.lists.delete(id);
     if (!this.keyList || !this.lists.has(this.keyList)) this.keyList = firstKeyList;
   }
 
   // ----- keys: actions, never raw keys
+
+  /** Tab (Shift+Tab: `back`): the module's Secondary action, Shift in its mods; in a
+   *  text field, the keyboard moves on to the next field as the shell's Tab would. */
+  tab(back, cx) {
+    if (this.inField()) {
+      const w = globalThis.window;
+      if (back) w?.focus_prev?.(); else w?.focus_next?.();
+      return;
+    }
+    this.sendEvents([{ Action: "Secondary" }], { shift: back });
+    cx.notify();
+  }
+
+  /** Scrolls the module's page list a page up or down, or to its start or end; false if
+   *  the module has none. The module hears where it is (VisibleRange). */
+  pageBy(move) {
+    const state = this.pageList != null && this.virtual.get(this.pageList);
+    if (!state) return false;
+    const total = this.lists.get(this.pageList)?.count ?? 0;
+    const [first, count] = (state.sent || "0:0").split(":").map(Number);
+    // The range counts the rows partly showing at both ends: a page keeps a row or so
+    // of the last one. The row in the middle moves by a page ("center" puts it there;
+    // "top" would only bring it to the nearer edge).
+    const page = Math.max(1, count - 3);
+    const mid = first + Math.floor(count / 2);
+    const to = { PageUp: mid - page, PageDown: mid + page, Home: 0 }[move];
+    if (move === "End") state.handle.scroll_to_bottom();
+    else state.handle.scroll_to_item(Math.max(0, Math.min(total - 1, to)), move === "Home" ? "top" : "center");
+    return true;
+  }
 
   /** Whether a text field has the keyboard. The field's focus and blur events don't
    *  come on every herdr-app (0.1.11 sends neither), so a key that reaches this view's
@@ -1011,6 +1182,8 @@ export class WasmView extends View {
       ? this.out?.actions?.find((o) => o.action?.Key != null && o.key === e.key) : null;
     if (named) {
       events = [{ Action: { Key: named.action.Key } }];
+    } else if (["PageUp", "PageDown", "Home", "End"].includes(move) && this.pageBy(move)) {
+      cx.notify();
     } else if (move && list && list.count > 0 && !["Left", "Right"].includes(move)) {
       const cur = list.selected ?? -1;
       const step = { Up: -1, Down: 1, PageUp: -10, PageDown: 10, Home: -1e9, End: 1e9 }[move];
@@ -1101,11 +1274,15 @@ export class WasmView extends View {
   }
 
   render(cx) {
+    if (this.native) return div().size_full().child(new this.native.WasmView(this.native.state));
     const t = theme();
     this.sendTheme();
     this.sendWindow();
-    const root = v_flex().id("wasm-mods").size_full().track_focus(this.focus)
+    this.sendFocused();
+    const root = v_flex().id("wasm-mods").size_full().track_focus(this.focus).key_context(KEY_CONTEXT)
       .on_key_down((e, cx) => this.key(e, cx))
+      .on_action("wasm-mods::tab", (_e, cx) => this.tab(false, cx))
+      .on_action("wasm-mods::tab-back", (_e, cx) => this.tab(true, cx))
       .on_mouse_down("left", () => { if (!this.fieldFocused) this.focus.focus(); })
       .on_size_change((reported, cx) => {
         const z = uiZoom(), size = { width: reported.width / z, height: reported.height / z };
@@ -1318,6 +1495,8 @@ export class WasmView extends View {
     let el = v_flex().id(`list-${v.id}`).gap(1).children(rows);
     if (v.font === "Mono" && settings()?.font_family) el = el.font_family(String(settings().font_family));
     el = this.sized(el, v.layout, ctx);
+    // A height of its own: rows past it scroll, inside it (never drawn over what's below).
+    if (v.layout?.height?.Fixed !== undefined || v.layout?.height === "Fill") el = el.overflow_y_scroll();
     if (!v.layout?.width || v.layout.width === "Auto") el = el.w_full();
     return el;
   }
@@ -1334,8 +1513,10 @@ export class WasmView extends View {
       const row = Math.min(Number(w.scroll_to.row), Math.max(0, total - 1));
       state.handle.scroll_to_item(row, "top");
     }
-    // One height for every row: the list places rows by it.
-    const rowH = v.dense ? 26 : 36;
+    // One height for every row: the list places rows by it, in the script's pixels (the
+    // app zooms a list's item sizes, as it does the row). Code (dense, monospace: a
+    // diff's lines) sits tight, line under line.
+    const rowH = v.dense ? (v.font === "Mono" ? 20 : 26) : 36;
     let el = v_virtual_list(`list-${v.id}`, total, rowH, (i) => String(i), (range) => {
       // (A one-row range is the list measuring itself, not what shows.)
       const seen = `${range.start}:${range.end - range.start}`;
@@ -1359,14 +1540,18 @@ export class WasmView extends View {
         this.keyList = v.id;
         const now = Date.now(), again = state.clicked?.i === i && now - state.clicked.at < 400;
         state.clicked = { i, at: now };
-        const events = [{ Selected: { id: v.id, index: i } }];
+        // Clicked "<list>#<row>": a click, not the keys (a folder opens on one click).
+        const events = [{ Selected: { id: v.id, index: i } }, { Clicked: { id: `${v.id}#${i}` } }];
         if (again) events.push({ Activated: { id: v.id, index: i } });
         this.sendEvents(events);
         this.focus.focus();
         cx.notify();
       });
-    // In a box of the size it's given, which it fills.
-    let box = div().relative().w_full().child(el);
+    // In a box of the size it's given, which it fills; a scrollbar on the right (where
+    // you are; drag it, or click the track).
+    let box = div().relative().w_full().child(el)
+      // The module's page always shows where it is; other lists' bars show when they move.
+      .child(Scrollbar.vertical(`list-${v.id}`).absolute().inset_0().when(Boolean(v.pages), (b) => b.mode("always")));
     if (v.font === "Mono" && settings()?.font_family) box = box.font_family(String(settings().font_family));
     const h = v.layout?.height;
     box = h?.Fixed !== undefined ? box.h(h.Fixed) : ctx.inRow ? box.h_full() : box.flex_1().min_h(0);
@@ -1409,7 +1594,9 @@ export class WasmView extends View {
       }
       if (it.tooltip) row = row.tooltip(it.tooltip);
       // Its own content, clipped to the row (a virtual row's has no handlers).
-      if (it.child) return row.child(div().flex_1().min_w(0).overflow_hidden().child(this.node(it.child, t, { inRow: false, virtual })));
+      // A flush row's content takes its whole height (a line's fill meets the next).
+      if (it.child) return row.child(div().flex_1().min_w(0).overflow_hidden().when(flush, (d) => d.h_full().flex().items_center())
+        .child(this.node(it.child, t, { inRow: false, virtual })));
       if (it.tree) row = row.child(div().text_color(t.dim).child(it.tree));
       if (it.dot != null) {
         // On the inverted selection the dot takes the row's text color.
@@ -1420,9 +1607,12 @@ export class WasmView extends View {
       }
       if (it.icon) row = row.child(div().text_color(it.icon_color != null ? hex(it.icon_color) : t.dim).child(it.icon));
       const roleColor_ = it.role ? roleColor(it.role, t) : null;
+      // One line, cut at the room it has (never under the detail); on the inverted
+      // selection every run takes the row's text colour, as the detail does.
+      const spanColor = (s) => selected && !soft ? fg : s.color != null ? hex(s.color) : fg;
       let label = it.label_spans?.length
-        ? h_flex().children(it.label_spans.map((s) => div().text_color(s.color != null ? hex(s.color) : fg).child(s.text)))
-        : div().child(it.label);
+        ? h_flex().min_w(0).overflow_hidden().whitespace_nowrap().children(it.label_spans.map((s) => div().flex_shrink_0().text_color(spanColor(s)).child(s.text)))
+        : div().min_w(0).truncate().child(it.label);
       if (roleColor_ && !selected) label = label.text_color(roleColor_);
       if (it.bold) label = label.font_semibold();
       let main = v_flex().flex_1().min_w(0).child(label);
@@ -1699,18 +1889,16 @@ export class WasmView extends View {
       if (!g) groups.set(key, (g = { color, builder: make() }));
       return g;
     };
-    // A path's points and stroke width aren't scaled by the app's zoom (other lengths
-    // are): they're scaled here.
-    const z = uiZoom();
+    // A path's points and stroke width are in the script's pixels: the app zooms them.
     const stroke = (width, color, points) => {
-      const g = group(`s/${color}/${width}`, color, () => PathBuilder.stroke(Math.max(0.5, width * zoom) * z));
-      let b = g.builder.move_to(points[0][0] * z, points[0][1] * z);
-      for (const [x, y] of points.slice(1)) b = b.line_to(x * z, y * z);
+      const g = group(`s/${color}/${width}`, color, () => PathBuilder.stroke(Math.max(0.5, width * zoom)));
+      let b = g.builder.move_to(points[0][0], points[0][1]);
+      for (const [x, y] of points.slice(1)) b = b.line_to(x, y);
       g.builder = b;
     };
     const fill = (color, points) => {
       const g = group(`f/${color}`, color, () => PathBuilder.fill());
-      g.builder = g.builder.add_polygon(z === 1 ? points : points.map(([x, y]) => [x * z, y * z]), true);
+      g.builder = g.builder.add_polygon(points, true);
     };
     for (const s of v.shapes ?? []) {
       const [kind, p] = Object.entries(s)[0];

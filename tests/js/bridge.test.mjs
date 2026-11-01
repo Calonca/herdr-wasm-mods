@@ -31,6 +31,17 @@ test("a newer fitting host takes over; the running one stays if it's the newest 
   assert.equal(shouldTakeOver(run("0.9.0"), pickHost(hosts, 4), [...hosts, H("0.9.0", 4, 9)], 4), false);
 });
 
+test("a protocol 5 module (a paged list) never runs on host 0.1.0 (protocol 4)", () => {
+  const old = [H("0.1.0", 4, 4)];
+  assert.equal(pickHost(old, 5), null); // so the copy installs the host its lock pins
+  const both = [...old, H("0.2.0", 4, 5)];
+  const run = { port: 1, token: "t", version: "0.1.0" };
+  assert.equal(pickHost(both, 5).version, "0.2.0");
+  assert.equal(shouldTakeOver(run, pickHost(both, 5), both, 5), true);
+  // Protocol 4 modules run on the new host too, and move to it.
+  assert.equal(shouldTakeOver(run, pickHost(both, 4), both, 4), true);
+});
+
 test("the run file: port, token and the host's version", () => {
   assert.deepEqual(parseRunFile(`4242 ${"c".repeat(48)} 0.2.0\n`), { port: 4242, token: "c".repeat(48), version: "0.2.0" });
   assert.equal(parseRunFile(`4242 ${"c".repeat(48)}\n`).version, "0.0.0");
