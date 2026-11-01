@@ -1,0 +1,13 @@
+[package]
+name = "wasm-mods-protocol"
+description = "What the wasm-mods host and a WASM mod exchange on every call"
+version.workspace = true
+edition.workspace = true
+# Kept buildable with an older compiler, for clients that embed it.
+rust-version = "1.95"
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

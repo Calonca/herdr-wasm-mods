@@ -1,0 +1,29 @@
+# The host and the crates WASM mods are written with. The mods themselves (wasm32) are
+# their own workspace in `modules/`.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+wasm-mods-protocol = { path = "crates/wasm-mods-protocol" }
+wasm-mods-sdk = { path = "crates/wasm-mods-sdk" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["raw_value"] }
+# The engine (Apache-2.0 WITH LLVM-exception): Cranelift, no WASI, no components.
+wasmtime = { version = "=50.0.0", default-features = false, features = ["std", "runtime", "cranelift"] }
+sha2 = "=0.10.9"
+toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "display", "serde"] }
+libc = "=0.2.190"
+wat = "=1.262.0"
+# The desktop's file chooser, through the XDG desktop portal (D-Bus).
+zbus = { version = "=5.19.0", default-features = false, features = ["blocking-api", "async-io"] }
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,7 @@
+target/
+node_modules/
+wasm-mods/mods/wasm-mods/gpui-kit.d.ts
+wasm-mods/mods/wasm-mods/jsconfig.json
+# Host builds and release files (RELEASING.md).
+/dist/
+*/mods/wasm-*/bin/
