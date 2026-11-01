@@ -9,7 +9,7 @@ first time it's shown on a machine it offers to install it.
 
 ## What you see
 
-- The first time: "todo asks to:", "a list of things to do, kept in a file",
+- The first time: "wasm-todo asks to:", "a list of things to do, kept in a file",
   two bullets ("read files in ~/.local/share/wasm-mods/todo", "change files
   in ~/.local/share/wasm-mods/todo") with their ids in small `dim` text,
   **Allow** and **Deny**, and "remembered for this build; a new build asks

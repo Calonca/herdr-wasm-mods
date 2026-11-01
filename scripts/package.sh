@@ -1,13 +1,14 @@
 #!/bin/sh
 # Readies the mod folders for a release, in place: each card's mod folder
 # (<card>/mods/wasm-*/) gets its module's .wasm and a host.lock.json pinning this
-# release's host. Then packs those folders into <hosts>/wasm-mods-X.Y.Z.tar.gz, writes
-# <hosts>/SHA256SUMS, and writes THIRD-PARTY-LICENSES (the licences of the crates built
-# into the host, with cargo-about) to the repo and to <hosts>.
+# release's host. Given mod folder names, only those are readied; the others are packed
+# as they are committed (their module and lock from an earlier release). Then packs
+# every mod folder into <hosts>/wasm-mods-X.Y.Z.tar.gz, writes <hosts>/SHA256SUMS, and writes THIRD-PARTY-LICENSES (the licences of the third-party
+# code built into the host and the modules: scripts/licenses/) to the repo and to <hosts>.
 #
 #   RELEASE_BASE=https://github.com/Calonca/herdr-wasm-mods/releases/download/v0.1.0 \
 #   SOURCE_GIT=https://github.com/Calonca/herdr-wasm-mods SOURCE_TAG=v0.1.0 \
-#   scripts/package.sh dist/host
+#   scripts/package.sh dist/host [wasm-diff …]
 #
 # dist/host holds the host builds, wasm-mods-host-x86_64 and wasm-mods-host-aarch64 (see
 # RELEASING.md); their sha256s and sizes go in every lock, with RELEASE_BASE/<file> as the
@@ -15,7 +16,9 @@
 # BUNDLE=1 also puts the host builds in each packed folder's bin/ (an offline install).
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
-hosts=${1:?usage: scripts/package.sh <folder with wasm-mods-host-x86_64 and -aarch64>}
+hosts=${1:?usage: scripts/package.sh <folder with wasm-mods-host-x86_64 and -aarch64> [mod folder …]}
+shift
+only=" $* "
 base=${RELEASE_BASE:?set RELEASE_BASE (https://…/download/vX.Y.Z)}
 case "$base" in https://*|file:///*) ;; *) echo "RELEASE_BASE must be https://" >&2; exit 1 ;; esac
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
@@ -41,6 +44,11 @@ pack=$(mktemp -d); trap 'rm -rf "$pack"' EXIT
 for dir in "$root"/*/mods/wasm-*/; do
   dir=${dir%/}; name=$(basename "$dir")
   [ -f "$dir/main.js" ] || continue
+  if [ "$only" != "  " ] && [ "${only#* $name }" = "$only" ]; then
+    cp -r "$dir" "$pack/$name"
+    echo "$name (as committed)"
+    continue
+  fi
   module=null
   if [ "$name" != wasm-mods ]; then
     m=$(echo "${name#wasm-}" | tr - _)
@@ -55,9 +63,8 @@ for dir in "$root"/*/mods/wasm-*/; do
   fi
   echo "$name"
 done
-# The licences of every crate built into the host, for both targets (scripts/licenses/).
-cargo about generate --frozen --fail -m "$root/crates/wasm-mods-host/Cargo.toml" \
-  -c "$root/scripts/licenses/about.toml" -o "$root/THIRD-PARTY-LICENSES" "$root/scripts/licenses/about.hbs"
+# The licences of the third-party code built into the host and the modules.
+"$root/scripts/licenses/generate.sh"
 cp "$root/THIRD-PARTY-LICENSES" "$hosts/THIRD-PARTY-LICENSES"
 tar -C "$pack" --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -czf "$hosts/wasm-mods-$version.tar.gz" .
 (cd "$hosts" && sha256sum wasm-mods-host-* > SHA256SUMS)

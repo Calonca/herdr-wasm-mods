@@ -74,11 +74,14 @@ where you manage them.
   them. The module then runs with what it got: a refused file read answers
   with an error the module shows.
 - Keys go to the module as actions, never raw keys: space = primary, tab =
-  secondary, ⏎ = open, Esc = back, arrows/j/k/PageUp/PageDown/Home/End move
-  a list's selection. In a focused text field every key types, and Esc leaves
-  the field.
+  secondary (Shift+Tab: secondary with Shift in its mods), ⏎ = open, Esc = back, arrows/j/k/PageUp/PageDown/Home/End move
+  a list's selection. A list the module marks as its page (protocol 5: the
+  diff's lines) takes PageUp/PageDown/Home/End instead, scrolling by a
+  screen, and shows a scrollbar. In a focused text field every key types,
+  and Esc leaves the field.
 - The core mod: **Deny** refuses at once; **Ask again** forgets the answer
-  (the module's prompt returns when it next needs it); the switch turns a
+  (the module's prompt returns on its next call: a click, a key, or its pane
+  getting the keyboard back); the switch turns a
   module off (its panes say so) or on; **Remove** asks to confirm, then
   deletes your module and its answers. Allow isn't offered here. Esc or **Done** closes it.
 - A new build of a module installed while it's shown reloads it in place,
@@ -101,11 +104,13 @@ where you manage them.
     "--token-file", f, "--port-file", p, "--host-file", h])`;
   - connects over `net` to 127.0.0.1 with a 48-hex-char token passed in a
     0700 folder (`~/.cache/wasm-mods/run/`), one connection per pane. Lines of
-    JSON go both ways: `hello`, `size`, `theme`, `window`, `events`
+    JSON go both ways: `hello`, `size`, `theme`, `window`, `focused`
+    (whether the pane has the keyboard, sent when it changes), `events`
     out; `ready`, `frame`, `error`, `focus`, `close`, `open`, `open_url` in;
   - draws the module's node tree (Column, Row, Text, TextField, List,
     Canvas, Popup) with gpui-kit/gpui-base elements: `v_flex`, `h_flex`,
-    `Input`/`InputState`, `v_virtual_list`, `PathBuilder` for canvases;
+    `Input`/`InputState`, `v_virtual_list`, `Scrollbar`, `PathBuilder` for
+    canvases;
   - reads `theme()`, `settings()` (zoom, font), `panes()`, `focused()`,
     `spaces()`; runs `pane.close` and `tab.new`, and `xdg-open`
     for a link the user clicks.
@@ -154,19 +159,19 @@ where you manage them.
 ## Done when
 
 - On a fresh home (no host, no `~/.local/share/wasm-mods`), copying the
-  release's `wasm-mods`, `wasm-hello` and `wasm-todo` folders into `mods/`:
-  `herdr-app check` passes for each, and `tab.new {"mod": "wasm-hello"}`
+  release's `wasm-mods`, `wasm-todo` and `wasm-diff` folders into `mods/`:
+  `herdr-app check` passes for each, and `tab.new {"mod": "wasm-todo"}`
   shows the core-needed panel with the lock's URL and SHA-256.
 - **Download** installs `host/X.Y.Z/wasm-mods-host`, whose SHA-256 is the
-  lock's, and hello starts. A file whose SHA-256 differs is refused, with
-  nothing installed.
+  lock's, and todo's prompt shows. A file whose SHA-256 differs is refused,
+  with nothing installed.
 - **Build from source** (host folder removed first) builds and installs the
-  same version, and hello starts.
+  same version, and todo's prompt shows.
 - `herdr-app status` lists no errors.
-- `mod.open {"name": "wasm-mods"}` lists the installed host and hello ("Asks for nothing.")
-  and todo (two rows, "allowed"). **Deny** on the read row writes
-  `denied` in `permissions.toml`; **Ask again** clears it, and after a reload
-  todo asks for that one again.
-- Killing `wasm-mods-host` while hello is shown: the pane comes back on a new
-  host within seconds.
+- `mod.open {"name": "wasm-mods"}` lists the installed host, todo (two rows,
+  "allowed") and the diff. **Deny** on todo's read row writes `denied` in
+  `permissions.toml`; **Ask again** clears it, and todo asks for that one
+  again when its pane next gets a call.
+- Killing `wasm-mods-host` while todo is shown: the pane comes back on a new
+  host within seconds, and its text field takes typing.
 - At zoom 1.4 nothing is cut off or misplaced.

@@ -29,7 +29,7 @@ manifest!(description: "a list of things to do, kept in a file",
 The first time it's shown, the module's pane asks you, in plain words, before the
 module gets any of it:
 
-> **todo asks to:**
+> **wasm-todo asks to:**
 > • read files in ~/.local/share/wasm-mods/todo
 > • change files in ~/.local/share/wasm-mods/todo
 >
@@ -43,6 +43,22 @@ What a module can ask for:
 | `fs.write:<folder>` | write, make folders and delete inside that folder |
 | `window.folder` | know the folder and git branch of the tab it's shown in |
 | `git` | run git in that folder, read-only commands only |
+
+### The git permission
+
+`git` lets a module read a repo's history and changes, nothing more. It comes
+with `window.folder`: git runs only in the folder of the tab the module is
+shown in, and the prompt asks for both:
+
+> **wasm-diff asks to:**
+> • know the folder and git branch of the tab it's in
+> • read the git history and changes of that folder
+
+The host runs git for it, with no shell, and only reading subcommands (`log`,
+`show`, `diff`, `status`, `rev-parse`, …). Options that would write a file, run
+another program or read outside the repo are refused, and external diff
+drivers, text conversion, fsmonitor and the pager are turned off whatever your
+git config says. A module can't run any other program.
 
 - **Nothing is granted without asking.** A module without a manifest gets
   nothing. A capability it uses without declaring it is refused. One this host
@@ -79,8 +95,8 @@ or bind a key in herdr-app's `keys.json`:
 ## Install
 
 Each WASM mod is a herdr-app mod folder of its own, ready to use, in a card
-folder at the top of this repo: `wasm-mods/` (the core mod), `wasm-hello/` and
-`wasm-todo/`. Each card holds a `RECIPE.md`, a `preview.png` and
+folder at the top of this repo: `wasm-mods/` (the core mod), `wasm-todo/`
+and `wasm-diff/`. Each card holds a `RECIPE.md`, a `preview.png` and
 `mods/<name>/`. That mod folder holds the module (`<name>.wasm`), the same
 bridge script (`wasm-bridge.js`), a `README.md` and a `host.lock.json`. The
 lock pins the host it needs: its version and, for each machine, the download
@@ -88,11 +104,11 @@ URL and its SHA-256. A mod folder works wherever you copy it.
 
 1. Add a card from Herdr's gallery, or copy `<card>/mods/<name>/` into
    herdr-app's `mods/` (`~/.config/herdr-app/mods/`, or
-   `$HERDR_APP_HOME/mods/`). The release's `wasm-mods-0.1.0.tar.gz` holds the
+   `$HERDR_APP_HOME/mods/`). The release's `wasm-mods-0.2.0.tar.gz` holds the
    same mod folders. Then check each one:
    `herdr-app check ~/.config/herdr-app/mods/wasm-todo`.
 2. Show one: `herdr-app do tab.new '{"mod": "wasm-todo"}'`, or put it in a
-   layout block: `{"content": {"mod": "wasm-hello"}}`.
+   layout block: `{"content": {"mod": "wasm-diff"}}`.
 3. The first time, with no host on this machine, the pane says **WASM Mods
    core needed**. It names the host version it would install, from where, and
    the SHA-256 it must match. Nothing happens until you click:
@@ -114,16 +130,11 @@ version, and every WASM mod on this machine shares it:
 - A mod copies its `.wasm` into `~/.local/share/wasm-mods/modules/` when that
   copy differs.
 
-Linux only. Version 0.1.0 pins hosts for x86_64 and aarch64, from
-`https://github.com/Calonca/herdr-wasm-mods/releases/download/v0.1.0/`. The
-aarch64 host is built and checked but untested on real aarch64 hardware. The
-host runs on the machine the window runs on. A tab on another machine needs nothing installed there: its git runs
-through `hc exec --on`.
-
-**Removing** a mod folder removes that mod and leaves the host for the others.
-**Remove** in the core mod also deletes the module and your answers for it.
-To remove everything, delete `~/.local/share/wasm-mods/`,
-`~/.config/wasm-mods/`, `~/.cache/wasm-mods/` and the `wasm-*` mod folders.
+Linux only. Each release pins hosts for x86_64 and aarch64, from
+`https://github.com/Calonca/herdr-wasm-mods/releases/download/v<version>/`.
+The aarch64 host is built and checked but untested on real aarch64 hardware.
+The host runs on the machine the window runs on. A tab on another machine
+needs nothing installed there: its git runs through `hc exec --on`.
 
 ### From source
 
@@ -181,15 +192,22 @@ is made.
 
 ## Modules
 
-- **hello**: a counter, two buttons and a canvas to draw on. No capabilities.
-  The template for new modules.
-- **todo**: a list of things to do, kept in
+- **todo** (`wasm-todo`): a list of things to do, kept in
   `~/.local/share/wasm-mods/todo/todo.json`. Asks to read and write that folder.
+- **diff** (`wasm-diff`): what changed in the tab's repo: uncommitted,
+  unpushed, the branch, or one commit (**commit ▾** lists the branch's recent
+  commits). A file tree, and each file's diff, unified or side by side,
+  syntax-coloured, with the changed words marked. PageUp/PageDown page through
+  it; a shows all files one after another. Asks for `window.folder` and `git`.
+
+`modules/` also holds the sources of two modules that aren't released as mods:
+`hello` (a counter and a canvas, no capabilities: the template for new
+modules) and `git-graph` (a commit graph, an example of `git` and canvases).
 
 ## Write your own module
 
 A module is a Rust crate built for `wasm32-unknown-unknown` with the SDK
-(`crates/wasm-mods-sdk`). Copy `modules/hello` and add it to
+(`crates/wasm-mods-sdk`). Copy `modules/hello` (the template) and add it to
 `modules/Cargo.toml`'s members:
 
 ```rust
@@ -228,9 +246,9 @@ manifest!(description: "a counter", capabilities: []);
   capabilities in your manifest.
 - Unit tests run natively: `cd modules && cargo test`.
 
-Give it a card and a mod folder: copy `wasm-hello/` to `wasm-<name>/`, rename
-its `mods/wasm-hello` to `mods/wasm-<name>`, and in that folder's `main.js`
-name the folder and the module
+Give it a card and a mod folder: copy `wasm-todo/` to `wasm-<name>/`, rename
+its `mods/wasm-todo` to `mods/wasm-<name>`, drop its `todo.wasm`, and in that
+folder's `main.js` name the folder and the module
 (`wasmMod({ folder: "wasm-<name>", module: "<name>" })`). The bridge is the
 same file everywhere: edit the core mod's
 (`wasm-mods/mods/wasm-mods/wasm-bridge.js`) and run `scripts/sync-bridge.sh`
@@ -250,14 +268,16 @@ The bridge's own tests:
 - `crates/wasm-mods-sdk`: the Rust SDK for modules.
 - `crates/wasm-mods-host`: the host.
 - `modules/`: the modules (their own workspace, built for wasm32).
-- `wasm-mods/`, `wasm-hello/`, `wasm-todo/`: the cards, one per mod: a
+- `wasm-mods/`, `wasm-todo/`, `wasm-diff/`: the cards, one per mod: a
   recipe, a preview, and the mod folder (`mods/<name>/`) with the release's
   module and lock.
 - `wasm-mods/mods/wasm-mods`: the core mod (hosts, permissions, any module by
   name). Its `wasm-bridge.js` is the bridge, copied into every mod folder.
 - `scripts/`: `install.sh` (from source), `package.sh` (a release's mod
-  folders, tarball and third-party licences), `sync-bridge.sh`.
-- `THIRD-PARTY-LICENSES`: the licences of the crates built into the host,
+  folders, tarball and third-party licences), `sync-bridge.sh`,
+  `licenses/` (what `THIRD-PARTY-LICENSES` is made from).
+- `THIRD-PARTY-LICENSES`: the licences of the crates built into the host and
+  into the modules, and of the syntax definitions in the diff module,
   attached to each release too.
 
 ## Known issues
@@ -270,6 +290,8 @@ The bridge's own tests:
 
 ## License
 
-MIT OR Apache-2.0, at your option. The host includes third-party crates under
-their own licences (MIT, Apache-2.0, Unicode-3.0, Zlib): see
-`THIRD-PARTY-LICENSES`.
+MIT OR Apache-2.0, at your option. The host and the modules include
+third-party crates under their own licences (MIT, Apache-2.0, Unicode-3.0,
+Zlib), and the diff module includes syntax definitions from Sublime
+Text's default packages under their own permissive licences (the
+packages' licence, and MIT for a few): see `THIRD-PARTY-LICENSES`.
