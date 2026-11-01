@@ -219,6 +219,7 @@ pub fn list(id: impl Into<String>, items: Vec<ListItem>, selected: Option<usize>
         font: Font::Auto,
         window: None,
         keyboard: true,
+        pages: false,
     }
 }
 

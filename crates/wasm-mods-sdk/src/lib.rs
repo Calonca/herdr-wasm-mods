@@ -52,9 +52,9 @@
 //! from the keyboard, a gamepad or a click on the hints the host draws under the window,
 //! and it says which it offers, labelled, in [`Output::actions`] (`.action(…)`); the host
 //! draws those hints in the glyphs of the device the user last used. Don't draw key
-//! hints yourself. With capability `keys`, up to [`MAX_KEYS`] keys of its own
-//! ([`Output::key`]: `"ctrl+s"`, also on a spare gamepad button) arrive as
-//! [`Action::Key`].
+//! hints yourself. Up to [`MAX_KEYS`] keys of its own ([`Output::key`]: a plain key
+//! such as `"n"`, never one the host keeps for the actions) arrive as [`Action::Key`]
+//! while its pane has the keyboard.
 //!
 //! Lay the UI out top to bottom at its natural height: the host scrolls the window when
 //! it's taller, so don't size content to `input.height` or build your own scrolling.
@@ -390,7 +390,7 @@ macro_rules! manifest {
             "version=", env!("CARGO_PKG_VERSION"), "\n",
             // The protocol it's built for (PROTOCOL_VERSION): the host doesn't run builds
             // for another.
-            "protocol=4\n",
+            "protocol=5\n",
             $("capability=", $capability, "\n",)*
         );
         #[unsafe(link_section = "wasm_mods.manifest")]
@@ -438,4 +438,15 @@ mod tests {
         );
     }
 
+}
+
+#[cfg(test)]
+mod manifest_protocol {
+    /// `manifest!` writes the protocol as text (a macro can't put a const in `concat!`):
+    /// it must be this SDK's.
+    #[test]
+    fn is_this_protocol() {
+        let line = format!("\"protocol={}\\n\"", crate::PROTOCOL_VERSION);
+        assert!(include_str!("lib.rs").contains(&line), "manifest! says another protocol than {line}");
+    }
 }

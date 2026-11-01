@@ -195,6 +195,14 @@ impl Node {
         self
     }
 
+    /// The module's page: PgUp/PgDn and Home/End scroll this list ([`Node::List::pages`]).
+    pub fn pages(mut self) -> Self {
+        if let Node::List { pages, .. } = &mut self {
+            *pages = true;
+        }
+        self
+    }
+
     /// A list's selected row.
     pub fn selected(mut self, new: Option<usize>) -> Self {
         if let Node::List { selected, .. } = &mut self {

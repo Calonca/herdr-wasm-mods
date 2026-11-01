@@ -198,7 +198,10 @@ pub enum OpenTarget {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     /// A pressable [`Node::Column`]/[`Node::Row`] (one with an `id`, e.g. a button) was
-    /// clicked, or a list item's trailing control ([`Trailing`]).
+    /// clicked, or a list item's trailing control ([`Trailing`]). A click on a virtual
+    /// list's row also sends `<list id>#<row>` (after its [`Event::Selected`]), which
+    /// the keys never do: a tree's folder can open on one click and stay put under the
+    /// arrows.
     Clicked { id: String },
     /// The selection of a [`Node::List`] moved to row `index`: a click, or (in a list
     /// with [`Node::List::keyboard`]) the keys.
@@ -284,7 +287,7 @@ pub enum ImageStatus {
 /// | `Primary` | Space (in a text field: Ctrl+Enter) | X | the first thing to do |
 /// | `Secondary` | Tab (in a text field: Alt+Enter) | Y | the second |
 /// | `Move` | arrows, PgUp/PgDn, Home/End, j/k | d-pad | selection, scrolling |
-/// | `Key(name)` | the key the module names | a spare button | capability `keys` only |
+/// | `Key(name)` | the key the module names | | its own keys ([`Output::key`]) |
 ///
 /// A [`Node::List`] with the keyboard takes `Move` (as [`Event::Selected`]) and `Open`
 /// (as [`Event::Activated`]) itself; the rest arrive here. An open popup takes Escape
@@ -296,7 +299,8 @@ pub enum Action {
     Primary,
     Secondary,
     Move(Move),
-    /// One of the module's own named keys ([`Offer::key`]), with capability `keys`.
+    /// One of the module's own named keys ([`Offer::key`]), while its pane has the
+    /// keyboard.
     Key(String),
 }
 

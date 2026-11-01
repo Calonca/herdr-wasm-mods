@@ -34,11 +34,11 @@ impl Output {
         self
     }
 
-    /// Offers one of the module's own keys (capability `keys`, at most [`MAX_KEYS`]):
-    /// `key` on the keyboard (`"ctrl+s"`, `"f2"`, `"n"`), and a spare gamepad button
-    /// the host picks; either sends [`Action::Key`] with `name`. Without the capability, or
-    /// on a key the host keeps for itself (Escape, Enter, Space, Tab, the arrows, its
-    /// `Ctrl+B` prefix…), it's ignored.
+    /// Offers one of the module's own keys: `key`, a plain key on the keyboard (`"n"`,
+    /// `"f2"`; not with Ctrl, Alt or Shift), sends [`Action::Key`] with `name` while the
+    /// module's pane has the keyboard and no text field in it is being typed in. Offer
+    /// at most [`MAX_KEYS`], and never a key the host keeps for the actions (Escape,
+    /// Enter, Space, Tab, Backspace, the arrows, PageUp/PageDown, Home/End, j/k).
     pub fn key(mut self, name: impl Into<String>, key: impl Into<String>, label: impl Into<String>) -> Self {
         self.actions.push(Offer { action: Action::Key(name.into()), label: label.into(), key: Some(key.into()) });
         self
@@ -71,7 +71,7 @@ pub struct Offer {
     pub action: Action,
     /// What it does here, a word or two.
     pub label: String,
-    /// For [`Action::Key`]: the keyboard key (`"ctrl+s"`).
+    /// For [`Action::Key`]: the keyboard key (`"n"`, `"f2"`).
     #[serde(default)]
     pub key: Option<String>,
 }

@@ -123,6 +123,11 @@ pub enum Node {
         /// first one with `keyboard`, while its window is focused. [`ui::list`] sets it.
         #[serde(default)]
         keyboard: bool,
+        /// The module's page: PgUp/PgDn scroll this (virtual) list by a page and
+        /// Home/End to its ends, whichever list has the keyboard, so the module hears
+        /// only the new [`Event::VisibleRange`] (a diff beside its file list).
+        #[serde(default)]
+        pages: bool,
     },
     /// A free drawing area; emits [`Event::Pointer`]. `width`/`height` are its size in
     /// points unless `layout` says otherwise (e.g. `Size::Fill` for a full-width bar).

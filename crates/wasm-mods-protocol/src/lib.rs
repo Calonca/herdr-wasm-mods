@@ -24,9 +24,12 @@ pub mod wire;
 
 /// Bumped when these types change incompatibly. A host runs modules built for any
 /// protocol from [`PROTOCOL_MIN`] to this one (`wasm-mods-host --version --json` says
-/// which), so a newer host keeps running older modules for as long as it can. Additions within a protocol are new fields with defaults and new events, which
-/// an older SDK of the same protocol skips ([`Input::events`]).
-pub const PROTOCOL_VERSION: u32 = 4;
+/// which), so a newer host keeps running older modules for as long as it can. Protocol 5
+/// (host 0.2.0): a list can be the module's page ([`Node::List`]'s `pages`:
+/// PageUp/PageDown/Home/End scroll it), which a protocol 4 host would drop. Additions
+/// within a protocol are new fields with defaults and new events, which an older SDK of
+/// the same protocol skips ([`Input::events`]).
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The oldest protocol this host still runs modules for.
 pub const PROTOCOL_MIN: u32 = 4;
