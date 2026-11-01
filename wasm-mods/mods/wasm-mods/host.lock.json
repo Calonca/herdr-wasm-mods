@@ -1,0 +1,4 @@
+{
+  "host": {"version": "0.1.0", "protocol": [4, 4], "files": {"linux-x86_64": {"url": "https://github.com/Calonca/herdr-wasm-mods/releases/download/v0.1.0/wasm-mods-host-x86_64", "sha256": "1b0ebe2a646824ede3b72ac04cb58889f54948276af879ba1b8456b43efe0172", "size": 15098872},"linux-aarch64": {"url": "https://github.com/Calonca/herdr-wasm-mods/releases/download/v0.1.0/wasm-mods-host-aarch64", "sha256": "d771490a10d9c3e3944ce70ac9d002b571e5d43029f808efe7ee01e8f3f4c15a", "size": 11448496}}, "source": {"git": "https://github.com/Calonca/herdr-wasm-mods", "tag": "v0.1.0"}},
+  "module": null
+}
