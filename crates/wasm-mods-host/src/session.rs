@@ -272,8 +272,16 @@ impl<'a> Session<'a> {
                 self.theme = Some(theme);
                 self.render(Vec::new());
             }
+            // A call when the pane gains or loses the keyboard: a module that looks again
+            // while focused starts at once, and a prompt brought back by the core mod's
+            // "Ask again" shows when the pane comes back, even on a screen with nothing to
+            // click.
             In::Focused(f) => {
+                let changed = self.focused != f;
                 self.focused = f;
+                if changed {
+                    self.render(Vec::new());
+                }
             }
             In::Window(window) => {
                 let changed = self.window != window;

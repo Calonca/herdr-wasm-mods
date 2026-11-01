@@ -13,7 +13,7 @@
 //! connection has been open for ten minutes.
 //!
 //! `wasm-mods-host --version [--json]` prints its version and the protocols it runs
-//! (`{"version": "0.1.0", "protocol": [4, 4]}`). `wasm-mods-host --list` prints the
+//! (`{"version": "0.2.0", "protocol": [4, 5]}`). `wasm-mods-host --list` prints the
 //! installed modules as JSON (`[{name, description}]`, for pickers) and exits.
 //! `--permissions`, `--allow`, `--deny`, `--forget`, `--enable`, `--disable` and
 //! `--remove` show and change what modules may do ([`cli`]).

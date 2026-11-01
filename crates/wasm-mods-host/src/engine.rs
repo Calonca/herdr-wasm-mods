@@ -440,3 +440,41 @@ mod tests {
         assert!(is_module(&spin) && !is_module(&other) && !is_module(&imports));
     }
 }
+
+/// Replays a module's recorded inputs through the engine, with its frame limits:
+/// `REPLAY_WASM=<module.wasm> REPLAY_INPUTS=<dir of input-*.json> cargo test --release
+/// -p wasm-mods-host replay -- --ignored --nocapture` (the diff module's bench writes
+/// them: DIFF_BENCH_DUMP). Prints each call's time, and the error if one stops it.
+#[cfg(test)]
+mod replay {
+    #[test]
+    #[ignore]
+    fn replay() {
+        let (Ok(wasm), Ok(dir)) = (std::env::var("REPLAY_WASM"), std::env::var("REPLAY_INPUTS")) else { return };
+        let bytes = std::fs::read(&wasm).unwrap();
+        let mut instance = super::Instance::load(&bytes, "replay").unwrap();
+        let mut inputs: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).collect();
+        inputs.sort();
+        let mut worst = 0.0f64;
+        for path in inputs {
+            let json = std::fs::read(&path).unwrap();
+            let t = std::time::Instant::now();
+            let r = instance.call(&json, &[]);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            worst = worst.max(ms);
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if let (Ok((out, _)), Ok(dir)) = (&r, std::env::var("REPLAY_OUT")) {
+                let _ = std::fs::write(format!("{dir}/{name}"), out);
+            }
+            match r {
+                Ok(_) if ms >= 20.0 => println!("REPLAY {name} {ms:.1} ms"),
+                Ok(_) => {}
+                Err(e) => {
+                    println!("REPLAY {name} {ms:.1} ms STOPPED: {e}");
+                    break;
+                }
+            }
+        }
+        println!("REPLAY worst {worst:.1} ms");
+    }
+}
