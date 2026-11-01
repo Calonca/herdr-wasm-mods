@@ -1,0 +1,14 @@
+# cargo-about: the licences of the crates built into wasm-mods-host (scripts/package.sh
+# writes THIRD-PARTY-LICENSES with it).
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+ignore-dev-dependencies = true
+# Our own crates (MIT OR Apache-2.0, not published) aren't third-party.
+private = { ignore = true }
