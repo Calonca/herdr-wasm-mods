@@ -1,0 +1,4 @@
+{
+  "host": {"version": "0.2.0", "protocol": [4, 5], "files": {"linux-x86_64": {"url": "https://github.com/Calonca/herdr-wasm-mods/releases/download/v0.2.0/wasm-mods-host-x86_64", "sha256": "4caa88ef7f49252af335af15a77e73090319034ede872d6f25844b9854bff4f2", "size": 15098360},"linux-aarch64": {"url": "https://github.com/Calonca/herdr-wasm-mods/releases/download/v0.2.0/wasm-mods-host-aarch64", "sha256": "f700daef7e817c78a9e70b8249cd6ccef98361d5c9b0a59efa2a0a7262ce6d48", "size": 11449136}}, "source": {"git": "https://github.com/Calonca/herdr-wasm-mods", "tag": "v0.2.0"}},
+  "module": {"name": "diff", "protocol": 5, "sha256": "2aa0bb9d2a576907e27acf6290fdaf4eb10a3df36a53b4c22a9ce7ed21a2aa14"}
+}

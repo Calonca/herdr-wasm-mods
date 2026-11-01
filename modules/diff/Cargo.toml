@@ -1,0 +1,16 @@
+[package]
+name = "diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-mods-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+syntect = { version = "=5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }

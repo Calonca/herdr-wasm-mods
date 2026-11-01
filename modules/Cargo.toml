@@ -5,7 +5,7 @@
 # natively: `cargo test`.
 [workspace]
 resolver = "3"
-members = ["hello", "todo", "git-graph"]
+members = ["hello", "todo", "git-graph", "diff"]
 
 [workspace.package]
 version = "0.1.0"
