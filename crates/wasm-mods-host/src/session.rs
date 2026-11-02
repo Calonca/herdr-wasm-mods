@@ -494,12 +494,17 @@ impl<'a> Session<'a> {
     }
 
     /// Opens `name` (with `arg`) in this window over the module shown, which is kept
-    /// as it is under it. If it can't load, it opens in a tab of its own instead.
+    /// as it is under it. If it can't load, it opens in a tab of its own instead. The
+    /// module is looked for as `wasm-<name>` first (a mod folder's module is installed
+    /// under the folder's name, `wasm-diff`), then as `<name>`.
     fn open_over(&mut self, name: &'static str, arg: String) {
-        let loaded = self.path_of(name).ok_or_else(|| format!("{name:?} isn't a module name")).and_then(|path| load_at(name, &path));
-        let loaded = match loaded {
-            Ok(_) if crate::extensions::is_off(name) => Err(format!("{name} is turned off")),
-            other => other,
+        let found = [format!("wasm-{name}"), name.to_owned()]
+            .into_iter()
+            .find_map(|n| self.path_of(&n).filter(|p| p.is_file()).map(|p| (n, p)));
+        let loaded = match found {
+            None => Err(format!("no module wasm-{name} or {name}")),
+            Some((n, _)) if crate::extensions::is_off(&n) => Err(format!("{n} is turned off")),
+            Some((n, path)) => load_at(&n, &path),
         };
         let new = match loaded {
             Ok(new) => new,
@@ -608,10 +613,16 @@ impl<'a> Session<'a> {
                         Some(machine) if w.folder.contains('\0') => Err(format!("not a valid folder on {machine}")),
                         Some(machine) => Ok(crate::tools::Place::On { machine: machine.clone(), folder: w.folder.clone() }),
                     });
-                    let why = if tool != "git" {
-                        Some(format!("{tool} isn't available here (only git)"))
-                    } else if !m.gate.allows(&Capability::Git) {
-                        Some("git isn't allowed for this module".into())
+                    let known = crate::tools::Tool::of(tool);
+                    let cap = match known {
+                        Some(crate::tools::Tool::Git) => Capability::Git,
+                        Some(crate::tools::Tool::Glab) => Capability::Glab,
+                        None => Capability::Unavailable(tool.clone()),
+                    };
+                    let why = if known.is_none() {
+                        Some(format!("{tool} isn't available here (only git and glab)"))
+                    } else if !m.gate.allows(&cap) {
+                        Some(format!("{tool} isn't allowed for this module"))
                     } else if self.tools.len() + self.under.as_ref().map_or(0, |u| u.tools.len()) >= crate::tools::RUNNING_MAX {
                         Some(format!("at most {} runs at once", crate::tools::RUNNING_MAX))
                     } else {
@@ -619,7 +630,10 @@ impl<'a> Session<'a> {
                     };
                     match (why, place) {
                         (Some(why), _) => self.tool_runs.push(refused(why)),
-                        (None, Some(Ok(place))) => self.tools.push(crate::tools::run_git(id.clone(), place, args.clone())),
+                        (None, Some(Ok(place))) => {
+                            let tool = known.expect("checked above");
+                            self.tools.push(crate::tools::run(tool, id.clone(), place, args.clone()))
+                        }
                         (None, Some(Err(why))) => self.tool_runs.push(refused(format!("no folder: {why}"))),
                         (None, None) => self.tool_runs.push(refused("no folder: its tab has no terminal in a folder".into())),
                     }

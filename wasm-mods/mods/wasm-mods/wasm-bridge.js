@@ -1295,8 +1295,40 @@ export class WasmView extends View {
   }
 
   render(cx) {
-    if (this.native) return div().size_full().child(new this.native.WasmView(this.native.state));
     const t = theme();
+    return this.framed(this.native ? div().size_full().child(new this.native.WasmView(this.native.state)) : this.page(t), t);
+  }
+
+  /** Opened in a popup: props `height`, how tall it draws itself (a popup gives it no
+   *  height of its own), and `pin` (a title) with `pinCommand` (a whole command, its
+   *  arguments in it): an "open in pane ⇥" button above it, which runs the command
+   *  (one that opens the same mod in a pane) and closes the popup. */
+  framed(el, t) {
+    const p = this.props, height = Number(p.height);
+    const pin = p.pin && p.pinCommand;
+    if (!(height > 0) && !pin) return el;
+    let outer = v_flex().id("wasm-mods-framed").w_full().bg(t.background).text_color(t.foreground);
+    outer = height > 0 ? outer.h(height).flex_shrink_0() : outer.size_full();
+    if (pin) {
+      outer = outer.child(h_flex().flex_shrink_0().justify_end().px(8).pt(6).child(
+        h_flex().id("wasm-mods-pin").h(22).px(8).gap(5).items_center().rounded(5)
+          .text_size(11.5).text_color(t.muted).cursor_pointer()
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .tooltip(`open ${p.pin} in a pane`)
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click(() => {
+            run(String(p.pinCommand));
+            if (p.overlay && typeof herdr.closeOverlay === "function") herdr.closeOverlay(p.overlay);
+          })
+          .child(div().child("open in pane"))
+          .child(div().text_size(13).child("⇥"))));
+    }
+    // The page below it takes what's left (its own size is the whole: flex wins).
+    return outer.child(el.flex_1().min_h(0));
+  }
+
+  /** The module's page, drawn here. */
+  page(t) {
     this.sendTheme();
     this.sendWindow();
     this.sendFocused();
@@ -1321,6 +1353,7 @@ export class WasmView extends View {
     if (!this.out) return root.p(14).child(div().text_color(t.dim).child(this.status ?? "loading…"));
     this.openPopup = null;
     this.popups = [];
+    this.unnamedCanvases = 0;
     let body;
     try {
       body = this.node(this.out.ui, t, { inRow: false });
@@ -1329,8 +1362,11 @@ export class WasmView extends View {
       console.warn(`wasm-mods: ${this.module}: ${e?.stack ?? e}`);
       return root.p(14).child(div().text_color(t.ansi1).child(`can't draw ${this.module}: ${e?.message ?? e}`));
     }
-    // The frame scrolls, unless a virtual list in it does.
-    let content = v_flex().id("wasm-mods-scroll").flex_1().min_h(0).p(14).child(body);
+    // The frame scrolls, unless a virtual list in it does. A root Column or Row whose id
+    // starts with "scroll:" keys that scroll: a new id (another page) starts at the top.
+    const rootId = Object.values(this.out.ui ?? {})[0]?.id;
+    const scrollKey = typeof rootId === "string" && rootId.startsWith("scroll:") ? rootId : "";
+    let content = v_flex().id(scrollKey ? `wasm-mods-scroll-${scrollKey}` : "wasm-mods-scroll").flex_1().min_h(0).p(14).child(body);
     // (What's wider than the pane is cut at its edge.)
     content = holdsVirtual(this.out.ui) ? content.overflow_hidden() : content.overflow_y_scroll();
     return root.relative().bg(t.background)
@@ -1359,7 +1395,7 @@ export class WasmView extends View {
     const [type, v] = Object.entries(n)[0];
     switch (type) {
       case "Column": case "Row": return this.container(type, v, t, ctx);
-      case "Text": return this.text(v, t);
+      case "Text": return this.text(v, t, ctx);
       case "TextField": return this.field(v, t, ctx);
       case "List": return this.list(v, t, ctx);
       case "Canvas": return this.canvas(v, t, ctx);
@@ -1432,7 +1468,8 @@ export class WasmView extends View {
     el = this.sized(el, layout, ctx);
     // Holding a virtual list (which scrolls itself): it takes the height it's given.
     if ((!layout.height || layout.height === "Auto") && holdsVirtual({ [type]: v })) el = ctx.inRow ? el.h_full() : el.flex_1().min_h(0);
-    if (v.id && !ctx.virtual) {
+    // Clickable when it has an id; a "scroll:" id only keys the page's scroll.
+    if (v.id && !ctx.virtual && !v.id.startsWith("scroll:")) {
       const id = v.id;
       el = el.cursor_pointer().on_click((_e, cx) => { this.sendEvents([{ Clicked: { id } }]); cx.stop_propagation(); })
         .on_mouse_down("right", (e, cx) => {
@@ -1459,7 +1496,7 @@ export class WasmView extends View {
     return "";
   }
 
-  text(v, t) {
+  text(v, t, ctx) {
     const style = v.style ?? "Body";
     let el = div();
     // Body, headings and titles take their container's color (a button's label).
@@ -1693,7 +1730,10 @@ export class WasmView extends View {
    *  and zoomed here (the module draws in world coordinates). */
   canvas(v, t, ctx) {
     const id = v.id;
-    const c = this.canvasState(id);
+    // A canvas without an id (""): its state is its place among the unnamed ones
+    // in this draw; in a virtual list's row (drawn on its own), a state of its own.
+    const key = id || `#${ctx.virtual ? "row" : this.unnamedCanvases++}`;
+    const c = !id && ctx.virtual ? { w: 0, h: 0, view: null, moved: false, reset: 0, down: null, sentView: "" } : this.canvasState(key);
     const pz = v.view ?? null;
     c.node = v;
     // In a virtual list's row, handlers aren't allowed: it's drawn at its own size,
@@ -1705,9 +1745,9 @@ export class WasmView extends View {
     const g = this.canvasGeometry(v, c);
     const { view, zoom, W, H, wx, wy } = g;
 
-    let el = div().id(`cv-${id}`).relative().flex_shrink_0().overflow_hidden();
+    let el = div().id(`cv-${key}`).relative().flex_shrink_0().overflow_hidden();
     el = el.h(v.height || 0);
-    if (v.layout?.width === "Fill" || (v.width === 0 && unit)) el = ctx.inRow ? el.flex_1() : el.w_full();
+    if (v.layout?.width === "Fill" || (v.width === 0 && v.coords === "Unit")) el = ctx.inRow ? el.flex_1() : el.w_full();
     else el = el.w(v.width);
     el = this.sized(el, v.layout, ctx);
     // In a virtual list's row, handlers aren't allowed: it's drawn at its own size,
@@ -1771,7 +1811,8 @@ export class WasmView extends View {
     if (!n || typeof n !== "object") return;
     const [type, v] = Object.entries(n)[0] ?? [];
     if (type === "Canvas") {
-      const c = this.canvases.get(v.id);
+      // An unnamed one is prepared as it's drawn (its key is its place in the draw).
+      const c = v.id ? this.canvases.get(v.id) : null;
       if (c) {
         c.node = v;
         this.prepare(c);

@@ -192,7 +192,10 @@ impl Frame for DiffMod {
             out.effects.push(Effect::Close);
         }
         if let Some(from) = &input.opened_from {
-            out = out.action(Action::Back, if from == "git_graph" { "graph" } else { from.as_str() });
+            // The module it came from, as people say it: `wasm-git-graph` (a mod folder's
+            // name) or `git_graph` is "git graph".
+            let from = from.strip_prefix("wasm-").unwrap_or(from).replace(['-', '_'], " ");
+            out = out.action(Action::Back, from);
         }
         out = out
             .action(Action::Open, "refresh")
