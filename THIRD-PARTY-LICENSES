@@ -5,10 +5,10 @@ code below, under these licences: the host (wasm-mods-host), the modules (the .w
 files in the mod folders), and the syntax definitions the diff module embeds.
 
 ================================================================================
-wasm-mods-host (x86_64 and aarch64, musl)
+wasm-mods-host (Linux musl and macOS, x86_64 and aarch64)
 ================================================================================
 
-- Apache License 2.0: 124 crate(s)
+- Apache License 2.0: 125 crate(s)
 - MIT License: 19 crate(s)
 - Unicode License v3: 1 crate(s)
 - zlib License: 1 crate(s)
@@ -2566,6 +2566,7 @@ Used by:
 - cranelift-srcgen 0.137.1
 - itoa 1.0.18
 - libc 0.2.190
+- mach2 0.6.0
 - pin-project-lite 0.2.17
 - proc-macro2 1.0.107
 - pulley-interpreter 50.0.0

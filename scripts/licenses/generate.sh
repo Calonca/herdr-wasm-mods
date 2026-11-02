@@ -1,6 +1,6 @@
 #!/bin/sh
 # Writes THIRD-PARTY-LICENSES (to the path given, default the repo's): the licences of
-# every third-party crate built into the host (both musl targets) and into the modules
+# every third-party crate built into the host (Linux musl and macOS, x86_64 and aarch64) and into the modules
 # (wasm32), with cargo-about, and of the syntax definitions the diff module embeds
 # (the packages' licence, sublime-packages.txt, and the files with their own,
 # sublime-syntaxes.txt).
@@ -18,9 +18,10 @@ code below, under these licences: the host (wasm-mods-host), the modules (the .w
 files in the mod folders), and the syntax definitions the diff module embeds.
 HEAD
   printf '\n================================================================================\n'
-  printf 'wasm-mods-host (x86_64 and aarch64, musl)\n'
+  printf 'wasm-mods-host (Linux musl and macOS, x86_64 and aarch64)\n'
   printf '================================================================================\n\n'
-  about -m "$root/crates/wasm-mods-host/Cargo.toml" --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+  about -m "$root/crates/wasm-mods-host/Cargo.toml" --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl \
+    --target aarch64-apple-darwin --target x86_64-apple-darwin
   printf '\n================================================================================\n'
   printf 'The modules (wasm32)\n'
   printf '================================================================================\n\n'
