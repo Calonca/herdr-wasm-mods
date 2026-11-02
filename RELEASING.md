@@ -44,19 +44,23 @@ cp target/aarch64-unknown-linux-musl/release/wasm-mods-host dist/host/wasm-mods-
 dist/host/wasm-mods-host-x86_64 --version --json   # {"protocol":[min,max],"version":"X.Y.Z"}
 ```
 
-The macOS hosts are built on a Mac, by the workflow `.github/workflows/macos-hosts.yml`:
-push the commit to release, run the workflow on it (Actions → macOS hosts → Run
-workflow, or `gh workflow run macos-hosts.yml --ref <branch>`), check its log (tests,
-signature, `--version`), and put the files of its artifact in `dist/host`:
+Or let CI build every host: the workflow `.github/workflows/hosts.yml` builds the Linux
+ones the same way (and tests the host), and the macOS ones on a Mac (Apple silicon and
+Intel, signed ad hoc), then writes one `SHA256SUMS` of them all. Push the commit to
+release, run the workflow on it (Actions → hosts → Run workflow, or `gh workflow run
+hosts.yml --ref <branch>`), check its log (tests, signatures, `--version`), and put the
+files of its artifact in `dist/host`:
 
 ```sh
-gh run download <run id> -n wasm-mods-host-macos -D dist/host
+gh run download <run id> -n wasm-mods-hosts -D dist/host
+chmod 755 dist/host/wasm-mods-host-*
 ```
 
-`package.sh` pins every host file it finds in `dist/host` and skips a missing one, so
-a release without them pins Linux only. On a pushed tag the workflow builds them again
-and adds them to that tag's release if they aren't there; those aren't the pinned
-ones, so for a release whose locks pin macOS, upload the files from `dist/host`.
+The macOS hosts can only come from there. `package.sh` pins every host file it finds in
+`dist/host` and skips a missing one, so a release without them pins Linux only. On a
+pushed tag the workflow builds them all again and adds to that tag's release the files
+it doesn't have yet (never replacing one); those aren't the pinned ones, so for a
+release whose locks pin macOS, upload the files from `dist/host`.
 
 ## 3. Build the modules
 
