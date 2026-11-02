@@ -291,8 +291,8 @@ impl DiffMod {
             };
             return column([bar, muted(note)]).gap(6.0).width(Size::Fill);
         }
-        let range = self.line_rows.range(total, MARGIN);
-        self.highlight(range.start as usize..range.end as usize);
+        let range = self.line_range(total);
+        self.colour_sent(range.start as usize..range.end as usize);
         let digits = self.digits();
         let (pan, wrapping) = (if self.wrap { 0 } else { self.pan }, self.cols);
         let _ = self.rows();
@@ -447,11 +447,12 @@ impl Draw<'_> {
         let mut out: Vec<Span> = Vec::new();
         for w in cuts.windows(2) {
             let (a, b) = (w[0], w[1]);
-            let mut span = run(&t[a..b], color_at(a));
-            if change.is_some_and(|(x, y)| x <= a && b <= y) {
-                span.bg = Some(with_alpha(mark, 0x47));
+            let (color, bg) = (color_at(a), change.is_some_and(|(x, y)| x <= a && b <= y).then(|| with_alpha(mark, 0x47)));
+            // Next to a run of the same look: one run (fewer to send and draw).
+            match out.last_mut() {
+                Some(last) if last.color == Some(color) && last.bg == bg => last.text.push_str(&t[a..b]),
+                _ => out.push(Span { bg, ..run(&t[a..b], color) }),
             }
-            out.push(span);
         }
         out
     }

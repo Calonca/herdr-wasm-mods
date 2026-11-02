@@ -138,6 +138,32 @@ fn highlights_a_hunk_per_side() {
     assert!(highlight::hunk("notes.unknownext", &js.hunks[0]).line(0, git::LineKind::Context).is_none());
 }
 
+/// The whole range's diff is cut into each file's part, under the path the file list
+/// has: a change, a rename, a deletion, a mode change, a binary file; a quoted path is
+/// left to be read on its own, and a part cut short is dropped.
+#[test]
+fn splits_a_whole_diff_by_file() {
+    let out = "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n\
+diff --git a/old name.rs b/new name.rs\nsimilarity index 90%\nrename from old name.rs\nrename to new name.rs\n--- a/old name.rs\n+++ b/new name.rs\n@@ -1 +1 @@\n-a\n+b\n\
+diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n--- a/looks like a header\n\
+diff --git a/run b/run\nold mode 100644\nnew mode 100755\n\
+diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n\
+diff --git \"a/t\\tab.rs\" \"b/t\\tab.rs\"\n--- \"a/t\\tab.rs\"\n+++ \"b/t\\tab.rs\"\n@@ -1 +1 @@\n-x\n+y\n\
+diff --git a/last.rs b/last.rs\n--- a/last.rs\n+++ b/last.rs\n@@ -1,3 +1,3 @@\n-cut sho";
+    let parts = split_diff(out, false);
+    let paths: Vec<Option<&str>> = parts.iter().map(|(p, _)| p.as_deref()).collect();
+    assert_eq!(paths, [Some("src/a.rs"), Some("new name.rs"), Some("gone.rs"), Some("run"), Some("logo.png"), None, Some("last.rs")]);
+    // Each part parses as that file's diff alone: the deleted file's last line isn't
+    // taken for the next file's header, nor the next header for its lines.
+    let gone = parse_diff(parts[2].1);
+    assert_eq!(gone.hunks[0].lines.len(), 1);
+    assert_eq!(gone.hunks[0].lines[0].text, "-- a/looks like a header");
+    assert_eq!(parse_diff(parts[0].1).hunks[0].lines.len(), 2);
+    assert!(parse_diff(parts[4].1).binary);
+    // Cut short: the last part is dropped (that file is read on its own).
+    assert_eq!(split_diff(out, true).len(), 6);
+}
+
 /// Wrapping cuts long lines after a space when it can, and each piece takes a row.
 #[test]
 fn wraps_long_lines_into_rows() {
@@ -168,7 +194,9 @@ fn a_refused_run_is_asked_again() {
     let refusal = ToolResult { tool: "git".into(), id: "1/diff/src/list.rs".into(), status: None, stdout: String::new(), stderr: "at most 4 runs at once".into() };
     let out = call(&mut m, vec![], vec![refusal]);
     assert!(!format!("{:?}", out.ui).contains("at most"), "shown as content");
-    assert_eq!(runs(&out).first().map(|r| r.0.as_str()), Some("1/diff/src/list.rs"), "asked again");
+    // Asked again, at once or (the whole range's diff being on its way) once a run is free.
+    let again = runs(&out).iter().any(|r| r.0 == "1/diff/src/list.rs") || m.queue.iter().any(|q| q.0 == "1/diff/src/list.rs");
+    assert!(again, "asked again");
     let out = call(&mut m, vec![], vec![git_answer("1/diff/src/list.rs", DIFF)]);
     assert!(format!("{:?}", out.ui).contains("count"));
 }
@@ -177,7 +205,7 @@ fn a_refused_run_is_asked_again() {
 /// one before it (a comment opened there is still open).
 #[test]
 fn highlights_big_hunks_a_block_at_a_time() {
-    use highlight::{BLOCK, BUDGET, HunkTokens, Token};
+    use highlight::{BLOCK, HunkTokens, Token, cost};
     let n = 10 * BLOCK;
     let mut body = String::from("+/* a comment that goes on\n");
     for i in 1..n {
@@ -186,13 +214,15 @@ fn highlights_big_hunks_a_block_at_a_time() {
     let d = parse_diff(&format!("@@ -0,0 +1,{n} @@\n{body}"));
     let h = &d.hunks[0];
     let mut t = HunkTokens::new("a.js", h);
-    assert_eq!(t.parse(h, 0..n, BUDGET), BUDGET, "never more than the budget");
-    assert!(t.has(0..BUDGET) && !t.has(0..n));
+    let costs = |lines: std::ops::Range<usize>| -> usize { h.lines[lines].iter().map(|l| cost(&l.text)).sum() };
+    // A budget a little over one block's: the block it ran out in is finished, no more.
+    assert_eq!(t.parse(h, 0..n, costs(0..BLOCK) + 1), costs(0..2 * BLOCK), "a block started is finished, then it stops");
+    assert!(t.has(0..2 * BLOCK) && !t.has(0..n) && !t.done());
     // The second block's lines are still in the comment the first one opened.
     let kind = |t: &HunkTokens, i: usize| t.line(i, git::LineKind::Added).and_then(|ts| ts.first()).map(|x| x.2);
     assert_eq!(kind(&t, BLOCK + 1), Some(Token::Comment));
     // Jumping far ahead parses just that block.
-    assert_eq!(t.parse(h, 8 * BLOCK..8 * BLOCK + 3, BUDGET), BLOCK);
+    assert_eq!(t.parse(h, 8 * BLOCK..8 * BLOCK + 3, 1), costs(8 * BLOCK..9 * BLOCK));
     assert!(t.has(8 * BLOCK..9 * BLOCK) && !t.has(6 * BLOCK..7 * BLOCK));
 }
 
@@ -286,8 +316,146 @@ fn bench_highlight() {
     let r = rows::rows(0, &d, false, None);
     println!("BENCH rows {:.1} ms ({} rows)", ms(&mut t), r.len());
     let mut h = highlight::HunkTokens::new("big.js", &d.hunks[0]);
-    let n = h.parse(&d.hunks[0], 0..60, highlight::BUDGET);
-    println!("BENCH budget parse {:.1} ms ({n} lines)", ms(&mut t));
+    let n = h.parse(&d.hunks[0], 0..60, 16_000);
+    println!("BENCH 16 kB parse {:.1} ms ({n} bytes)", ms(&mut t));
     let _ = highlight::hunk("big.js", &d.hunks[0]);
     println!("BENCH whole hunk {:.1} ms", ms(&mut t));
+}
+
+
+/// Scrolling a big diff: `DIFF_BENCH=<repo> DIFF_BENCH_COMMIT=<hash> [DIFF_BENCH_ALL=1]
+/// [DIFF_BENCH_STEP=<rows>] [DIFF_BENCH_QUIET=<calls>] [DIFF_BENCH_DUMP=<dir>] cargo test
+/// --release -p diff bench_scroll -- --ignored --nocapture`. Reads the range as `bench`
+/// does, then scrolls down `STEP` rows at a time (the diff's list, 25 rows showing), with
+/// `QUIET` calls of its own between (as the host makes while the module is busy). Each
+/// step counts the rows showing that the frame before didn't send (blank until this
+/// module answers) and those showing without their colours.
+#[test]
+#[ignore]
+fn bench_scroll() {
+    let Ok(repo) = std::env::var("DIFF_BENCH") else { return };
+    let commit = std::env::var("DIFF_BENCH_COMMIT").ok();
+    let all = std::env::var("DIFF_BENCH_ALL").is_ok();
+    let step: u64 = std::env::var("DIFF_BENCH_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+    let quiet: usize = std::env::var("DIFF_BENCH_QUIET").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+    let dump = std::env::var("DIFF_BENCH_DUMP").ok();
+    let mut m = DiffMod::default();
+    let mut calls = 0usize;
+    let mut call = |m: &mut DiffMod, events: Vec<Event>, runs: Vec<ToolResult>| -> (serde_json::Value, f64) {
+        let window = Some(WindowContext { folder: repo.clone(), ..Default::default() });
+        let input = Input { events, window, arg: commit.clone(), width: 1200.0, height: 800.0, data: HostData { tool_runs: runs, ..Default::default() }, ..Default::default() };
+        let json = serde_json::to_vec(&input).unwrap();
+        if let Some(dir) = &dump {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(format!("{dir}/input-{calls:05}.json"), &json).unwrap();
+        }
+        calls += 1;
+        let t = std::time::Instant::now();
+        let out = wasm_mods_sdk::__abi::update(m, &json);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        (serde_json::from_slice(&out).unwrap(), ms)
+    };
+    let run_git = |out: &serde_json::Value| -> Vec<ToolResult> {
+        (out["effects"].as_array().into_iter().flatten())
+            .filter_map(|e| serde_json::from_value::<Effect>(e.clone()).ok())
+            .filter_map(|e| match e {
+                Effect::RunTool { tool, id, args } if tool == "git" => Some((id, args)),
+                _ => None,
+            })
+            .map(|(id, args)| {
+                let o = std::process::Command::new("git").args(&args).current_dir(&repo).output().unwrap();
+                ToolResult { tool: "git".into(), id, status: o.status.code(), stdout: String::from_utf8_lossy(&o.stdout).into(), stderr: String::from_utf8_lossy(&o.stderr).into() }
+            })
+            .collect()
+    };
+    let t0 = std::time::Instant::now();
+    let mut events = if all { vec![Event::Action(Action::Key("all-files".into()))] } else { vec![] };
+    let mut answers = Vec::new();
+    let (mut out, mut load_ms) = (serde_json::Value::Null, 0.0);
+    for n in 0..200 {
+        let (o, ms) = call(&mut m, std::mem::take(&mut events), std::mem::take(&mut answers));
+        load_ms += ms;
+        answers = run_git(&o);
+        out = o;
+        if answers.is_empty() && n > 2 {
+            break;
+        }
+    }
+    let busy = |o: &serde_json::Value| o["wants"]["busy"].as_bool().unwrap_or(false);
+    let sent = |o: &serde_json::Value| -> Option<(u64, u64)> {
+        fn find(v: &serde_json::Value) -> Option<(u64, u64)> {
+            if let Some(l) = v.get("List").filter(|l| l["id"] == LINES) {
+                let w = &l["window"];
+                let first = w["first"].as_u64()?;
+                return Some((first, first + l["items"].as_array()?.len() as u64));
+            }
+            match v {
+                serde_json::Value::Object(o) => o.values().find_map(find),
+                serde_json::Value::Array(a) => a.iter().find_map(find),
+                _ => None,
+            }
+        }
+        find(&o["ui"])
+    };
+    let total = m.rows().len() as u64;
+    println!("BENCH loaded in {:.0} ms ({load_ms:.0} ms in calls), {} files, {total} rows, frame {} kB", t0.elapsed().as_secs_f64() * 1e3, m.repo.files.len(), out.to_string().len() / 1000);
+    let plain = |m: &mut DiffMod, first: u64| -> usize {
+        let rows: Vec<Row> = m.rows().iter().skip(first as usize).take(25).cloned().collect();
+        rows.iter()
+            .filter(|r| {
+                let (file, hunk, lines) = match r {
+                    Row::Unified { file, hunk, cell, .. } => (*file, *hunk, vec![cell.line]),
+                    Row::Split { file, hunk, left, right, .. } => (*file, *hunk, left.iter().chain(right).map(|c| c.line).collect()),
+                    // A file not read yet.
+                    Row::Notice { text, .. } => return text == "reading…",
+                    _ => return false,
+                };
+                let path = &m.repo.files[file].path;
+                !lines.iter().all(|&l| m.repo.tokens.get(&(path.clone(), hunk)).is_some_and(|t| t.has(l..l + 1)))
+            })
+            .count()
+    };
+    let (mut blank, mut uncoloured, mut steps, mut worst, mut sum, mut quiet_ms, mut quiet_n) = (0u64, 0usize, 0, 0.0f64, 0.0, 0.0, 0);
+    let mut first = 0u64;
+    let mut last = sent(&out);
+    let mut last_out = out.clone();
+    // (The rows grow as files are read.)
+    while first + step < m.rows().len() as u64 {
+        first += step;
+        // git's answers to what the last call asked come with this one.
+        let runs = run_git(&last_out);
+        let (o, ms) = call(&mut m, vec![Event::VisibleRange { id: LINES.into(), first, count: 25 }], runs);
+        // Rows showing that the last frame didn't send: blank until this answer lands.
+        if let Some((a, b)) = last {
+            blank += (first..first + 25).filter(|r| *r < a || *r >= b).count() as u64;
+        }
+        uncoloured += plain(&mut m, first);
+        last = sent(&o);
+        (worst, sum, steps) = (worst.max(ms), sum + ms, steps + 1);
+        let mut o = o;
+        for _ in 0..quiet {
+            if !busy(&o) {
+                break;
+            }
+            let runs = run_git(&o);
+            let (q, ms) = call(&mut m, vec![], runs);
+            (quiet_ms, quiet_n) = (quiet_ms + ms, quiet_n + 1);
+            o = q;
+        }
+        last_out = o;
+    }
+    println!(
+        "BENCH scroll {steps} steps of {step} rows: blank rows {blank}, rows uncoloured or reading {uncoloured}, event call avg {:.1} ms worst {worst:.1} ms; quiet calls {quiet_n}, avg {:.1} ms",
+        sum / steps.max(1) as f64, quiet_ms / quiet_n.max(1) as f64
+    );
+    // The rest of the background work, to the end.
+    let (mut n, mut ms_all, mut worst_q) = (0, 0.0, 0.0f64);
+    loop {
+        let (o, ms) = call(&mut m, vec![], vec![]);
+        (n, ms_all, worst_q) = (n + 1, ms_all + ms, worst_q.max(ms));
+        if !busy(&o) || n > 100_000 {
+            break;
+        }
+    }
+    println!("BENCH background to the end: {n} calls, {ms_all:.0} ms, worst {worst_q:.1} ms; coloured {} kB, {} hunks", m.repo.coloured / 1000, m.repo.tokens.len());
 }

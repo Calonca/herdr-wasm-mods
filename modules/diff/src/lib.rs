@@ -7,11 +7,14 @@
 //! sideways (←/→) or wrap (w). Tab goes to the next file (Shift+Tab back), Enter
 //! (or "refresh") reads it all again; while the window has focus it also looks again
 //! every few seconds. "commit ▾" picks one of the branch's recent commits.
+
 //!
 //! Everything comes from git, run by the host in the tab's folder (capability `git`,
 //! reading commands only): the mod asks with `run_tool("git", …)` and reads the answers
-//! in a later call. Untracked files are listed but not shown: their content is outside
-//! git, and the commands that would read it (`diff --no-index`) aren't allowed.
+//! in a later call. Every file's diff is read at once, and coloured in the background
+//! (the rows on screen first), so scrolling finds its rows ready. Untracked files are
+//! listed but not shown: their content is outside git, and the commands that would read
+//! it (`diff --no-index`) aren't allowed.
 //!
 //! Build:   cargo build --release --target wasm32-unknown-unknown   (in modules/)
 //! Install: ../scripts/install.sh diff
@@ -45,8 +48,27 @@ const PAN: usize = 8;
 const TOGGLES: [(&str, &str, &str); 3] = [("all-files", "a", "all files"), ("side-by-side", "s", "side by side"), ("wrap", "w", "wrap")];
 /// git runs the host lets a module have going at once.
 const RUNS_MAX: usize = 4;
-/// All files: diffs are read for the rows on screen and this many rows either side.
-const AHEAD_ROWS: usize = 60;
+/// All files: diffs are read for the rows on screen and this many rows either side (until
+/// the whole range's diff, read at once, is in).
+const AHEAD_ROWS: usize = 160;
+/// Rows sent beyond those showing: ahead, the way the user last scrolled, and behind. A
+/// scroll that lands within them shows its rows at once, without waiting for this
+/// module's next answer.
+pub(crate) const AHEAD: u64 = 100;
+pub(crate) const BEHIND: u64 = 30;
+/// Colouring work ([`highlight::cost`], about bytes) a call may do: the rows showing, the
+/// rest of the rows sent, and the rest of the diff in the background: in a call of its
+/// own ([`Wants::busy`]), or, with a host that makes none, a little in each call.
+const SHOWING_WORK: usize = 96_000;
+const SENT_WORK: usize = 2_000;
+const BACKGROUND_WORK: usize = 4_000;
+const EVENT_WORK: usize = 1_000;
+/// The most colouring kept for one range (about bytes of code): past it, only what's
+/// shown is coloured.
+const COLOURED_MAX: usize = 16 << 20;
+/// The whole range's diff is read at once when it changes at most this many lines; a
+/// bigger one is read a file at a time, as it's shown.
+const ALL_AT_ONCE_MAX: u32 = 200_000;
 /// How often (seconds) it reads the changes again while the window has focus.
 const POLL_SECS: f64 = 4.0;
 
@@ -89,8 +111,20 @@ struct Repo {
     version: u64,
     /// The rows shown, and what they were built for.
     rows: Option<(RowKey, Vec<Row>)>,
-    /// Syntax tokens of the hunks shown so far, by `(path, hunk)`.
+    /// Syntax tokens of the hunks coloured so far, by `(path, hunk)`; the files done
+    /// (every hunk), and how much was coloured ([`highlight::cost`]).
     tokens: BTreeMap<(String, usize), highlight::HunkTokens>,
+    coloured_files: BTreeSet<String>,
+    coloured: usize,
+}
+
+impl Repo {
+    /// Drops the colouring done.
+    fn uncolour(&mut self) {
+        self.tokens.clear();
+        self.coloured_files.clear();
+        self.coloured = 0;
+    }
 }
 
 /// What the rows depend on: all files, side by side, the file (one-file view), the
@@ -154,6 +188,15 @@ pub struct DiffMod {
     /// Esc, opened over another module: go back to it (this call's answer says so).
     #[serde(skip)]
     back: bool,
+    /// The diff was last scrolled up: the rows sent beyond those showing are above them.
+    #[serde(skip)]
+    up: bool,
+    /// The host calls again while this module is busy ([`Wants::busy`]): calls answering
+    /// the user leave the background alone.
+    #[serde(skip)]
+    called_back: bool,
+    #[serde(skip)]
+    was_busy: bool,
 }
 
 impl Frame for DiffMod {
@@ -187,6 +230,14 @@ impl Frame for DiffMod {
             None => "diff".to_owned(),
         };
         let mut out = Output::new(title, self.view(input)).wants_window();
+        // The rest of the diff coloured in the background, a slice per call.
+        let quiet = input.events.is_empty() && input.data.tool_runs.is_empty() && input.data.fs.is_empty();
+        self.called_back |= quiet && self.was_busy;
+        let work = if input.events.is_empty() { BACKGROUND_WORK } else if self.called_back { 0 } else { EVENT_WORK };
+        self.was_busy = self.repo.stage == Stage::Ready && self.background(work);
+        if self.was_busy {
+            out = out.busy();
+        }
         self.flush(&mut out);
         if std::mem::take(&mut self.back) {
             out.effects.push(Effect::Close);
@@ -216,7 +267,10 @@ impl DiffMod {
 
     fn handle(&mut self, input: &Input) {
         self.file_rows.handle(&input.events, FILES);
-        self.line_rows.handle(&input.events, LINES);
+        let was = self.line_rows.first;
+        if self.line_rows.handle(&input.events, LINES) && self.line_rows.first != was {
+            self.up = self.line_rows.first < was;
+        }
         self.picker_rows.handle(&input.events, PICKER);
         // A double-click's second click comes with its Activated: it changes nothing more
         // (the first click opened or closed the folder).
@@ -480,9 +534,34 @@ impl DiffMod {
         out
     }
 
-    /// The syntax tokens of the lines of rows `range`, worked out for those not yet, at
-    /// most [`highlight::BUDGET`] lines a call (the rest stay plain until a later one).
-    fn highlight(&mut self, range: std::ops::Range<usize>) {
+    /// The rows to send: those showing, [`AHEAD`] more the way the user scrolls and
+    /// [`BEHIND`] the other way.
+    pub(crate) fn line_range(&self, total: u64) -> std::ops::Range<u64> {
+        let (before, after) = if self.up { (AHEAD, BEHIND) } else { (BEHIND, AHEAD) };
+        let rows = &self.line_rows;
+        let start = rows.first.saturating_sub(before).min(total);
+        let end = rows.first.saturating_add(rows.count).saturating_add(after).min(total);
+        start..end.max(start)
+    }
+
+    /// Colours the rows sent: those showing first (all of them, within a generous
+    /// budget), then the rest, a slice a call. The rest of the diff is the background's.
+    pub(crate) fn colour_sent(&mut self, sent: std::ops::Range<usize>) {
+        let showing = self.line_rows.first as usize..(self.line_rows.first + self.line_rows.count) as usize;
+        let showing = showing.start.max(sent.start)..showing.end.min(sent.end);
+        self.highlight(showing.clone(), SHOWING_WORK);
+        // Ahead first, then behind.
+        let (ahead, behind) = (showing.end.max(sent.start)..sent.end, sent.start..showing.start.min(sent.end));
+        let ahead = if self.up { [behind, ahead] } else { [ahead, behind] };
+        let mut budget = SENT_WORK;
+        for range in ahead {
+            budget = budget.saturating_sub(self.highlight(range, budget));
+        }
+    }
+
+    /// The syntax tokens of the lines of rows `range`, worked out for those not yet,
+    /// within `budget`; returns the work done.
+    fn highlight(&mut self, range: std::ops::Range<usize>, budget: usize) -> usize {
         // Each hunk's lines in these rows, in the order they show.
         let mut wanted: Vec<((usize, usize), std::ops::Range<usize>)> = Vec::new();
         for r in self.rows().get(range).unwrap_or_default() {
@@ -502,16 +581,58 @@ impl DiffMod {
             }
         }
         let repo = &mut self.repo;
-        let mut budget = highlight::BUDGET;
+        let mut spent = 0;
         for ((file, hunk), lines) in wanted {
+            if spent >= budget {
+                break;
+            }
             let path = &repo.files[file].path;
             let Some(Ok(diff)) = repo.diffs.get(path) else { continue };
             let Some(h) = diff.hunks.get(hunk) else { continue };
             let tokens = repo.tokens.entry((path.clone(), hunk)).or_insert_with(|| highlight::HunkTokens::new(path, h));
             if !tokens.has(lines.clone()) {
-                budget = budget.saturating_sub(tokens.parse(h, lines, budget));
+                spent += tokens.parse(h, lines, budget - spent);
             }
         }
+        repo.coloured += spent;
+        spent
+    }
+
+    /// Colours the diff's hunks not coloured yet, within `budget`: the selected file's
+    /// first, then the files after it in the list's order (Tab's), wrapping. Returns
+    /// whether any is left (files not read yet wait for their diff, whose answer calls
+    /// this module again; past [`COLOURED_MAX`] none is).
+    fn background(&mut self, mut budget: usize) -> bool {
+        let repo = &mut self.repo;
+        if repo.coloured >= COLOURED_MAX {
+            return false;
+        }
+        let order: Vec<usize> = repo.tree.iter().filter_map(|n| if let tree::Kind::File(i) = n.kind { Some(i) } else { None }).collect();
+        let at = self.selected.as_ref().and_then(|p| order.iter().position(|&i| repo.files[i].path == *p)).unwrap_or(0);
+        for &i in order[at..].iter().chain(&order[..at]) {
+            let path = &repo.files[i].path;
+            if repo.coloured_files.contains(path) {
+                continue;
+            }
+            let Some(Ok(diff)) = repo.diffs.get(path) else { continue };
+            for (k, h) in diff.hunks.iter().enumerate() {
+                let tokens = repo.tokens.entry((path.clone(), k)).or_insert_with(|| highlight::HunkTokens::new(path, h));
+                if tokens.done() {
+                    continue;
+                }
+                if budget == 0 {
+                    return true;
+                }
+                let spent = tokens.parse(h, 0..h.lines.len(), budget);
+                repo.coloured += spent;
+                budget = budget.saturating_sub(spent);
+                if !tokens.done() {
+                    return true;
+                }
+            }
+            repo.coloured_files.insert(path.clone());
+        }
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -531,7 +652,7 @@ impl DiffMod {
         repo.stage = Stage::Resolving;
         if force {
             repo.diffs.clear();
-            repo.tokens.clear();
+            repo.uncolour();
             repo.version += 1;
             repo.stamp.clear();
         }
@@ -733,7 +854,7 @@ impl DiffMod {
             repo.shown = Default::default();
             repo.files = files;
             repo.diffs.clear();
-            repo.tokens.clear();
+            repo.uncolour();
             repo.version += 1;
             repo.stamp = stamp;
         }
@@ -748,18 +869,28 @@ impl DiffMod {
         Some(Ok(()))
     }
 
-    /// Takes in file diffs read, and asks for those shown: the selected file's; all
-    /// files, those whose rows are on screen or near it (a file not read yet is one
-    /// "reading…" row), never all of them. Runs queued for files gone from sight are
+    /// Takes in file diffs read, and asks for those shown first: the selected file's;
+    /// all files, those whose rows are on screen or near it (a file not read yet is one
+    /// "reading…" row). Then every file's, in one run ([`DiffMod::read_all`]), so a
+    /// scroll or a file switch finds it read. Runs queued for files gone from sight are
     /// dropped.
     fn read_diffs(&mut self) {
+        if let Some(r) = self.repo.got.remove("all") {
+            self.take_all(&r);
+        }
         let names: Vec<String> = self.repo.got.keys().filter(|k| k.starts_with("diff/")).cloned().collect();
         for name in names {
             if let Some(r) = self.repo.got.remove(&name) {
                 let path = name["diff/".len()..].to_owned();
-                self.repo.tokens.retain(|(p, _), _| *p != path);
-                self.repo.diffs.insert(path, answer(&r).map(|out| parse_diff(&out)));
-                self.repo.version += 1;
+                // Read with the whole range's diff meanwhile: kept.
+                if matches!(self.repo.diffs.get(&path), Some(Ok(_))) {
+                    continue;
+                }
+                let repo = &mut self.repo;
+                repo.tokens.retain(|(p, _), _| *p != path);
+                repo.coloured_files.remove(&path);
+                repo.diffs.insert(path, answer(&r).map(|out| parse_diff(&out)));
+                repo.version += 1;
             }
         }
         let mut wanted: Vec<usize> = self.selected_file().and_then(|f| self.repo.files.iter().position(|g| g.path == f.path)).into_iter().collect();
@@ -790,6 +921,51 @@ impl DiffMod {
         for file in wanted {
             self.read_diff(&file);
         }
+        // Then every file's, in one run (the ones shown come first, on their own).
+        self.read_all();
+    }
+
+    /// Asks for the whole range's diff, every file's in one run, while some file's isn't
+    /// in (and the range isn't too big for that: then each is read as it's shown).
+    fn read_all(&mut self) {
+        let repo = &self.repo;
+        let lines: u32 = repo.files.iter().map(|f| f.added.unwrap_or(0).saturating_add(f.removed.unwrap_or(0))).fold(0, u32::saturating_add);
+        let missing = repo.files.iter().any(|f| f.status != '?' && !repo.diffs.contains_key(&f.path));
+        if !missing || lines > ALL_AT_ONCE_MAX || repo.asked.contains("all") {
+            return;
+        }
+        let Some(range) = repo.range.clone() else { return };
+        let revs = range.revs();
+        let mut args = vec!["diff", "-U3", "--no-color", "-M", "--end-of-options"];
+        args.extend(revs.iter().map(String::as_str));
+        args.push("--");
+        self.need("all", &args);
+    }
+
+    /// Takes in the whole range's diff: each file's part, for the files not read yet.
+    /// A part it can't tell the file of stays to be read on its own.
+    fn take_all(&mut self, r: &ToolResult) {
+        let Ok(out) = answer(r) else { return };
+        let cut = r.stderr.contains("output was cut");
+        let repo = &mut self.repo;
+        let mut took = false;
+        for (path, text) in split_diff(&out, cut) {
+            let Some(path) = path else { continue };
+            if repo.diffs.contains_key(&path) || !repo.files.iter().any(|f| f.path == path && f.status != '?') {
+                continue;
+            }
+            repo.diffs.insert(path, Ok(parse_diff(text)));
+            took = true;
+        }
+        if took {
+            repo.version += 1;
+        }
+        // Single reads queued for files now in: not needed.
+        let generation = self.generation;
+        self.queue.retain(|(id, _)| {
+            let path = id.strip_prefix(&format!("{generation}/diff/"));
+            !path.is_some_and(|p| repo.diffs.contains_key(p))
+        });
     }
 
     /// Asks for a file's diff, unless it's in, asked, or untracked.
