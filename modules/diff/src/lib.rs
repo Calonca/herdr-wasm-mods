@@ -177,9 +177,12 @@ pub struct DiffMod {
     /// Folders folded in the file list, by path.
     #[serde(default)]
     folded: Vec<String>,
-    /// Characters the code is scrolled sideways (not wrapping).
+    /// Characters the code is scrolled sideways (not wrapping), and the part of one a
+    /// sideways wheel has moved it so far.
     #[serde(default)]
     pan: usize,
+    #[serde(skip)]
+    pan_part: f32,
     /// The wrapping width in characters of code, worked out from the window's width.
     #[serde(skip)]
     cols: Option<usize>,
@@ -364,9 +367,12 @@ impl DiffMod {
                 Event::Action(Action::Open) => self.reload(true),
                 // Tab; Shift+Tab goes back.
                 Event::Action(Action::Secondary) => self.step_file(if input.mods.shift { -1 } else { 1 }),
-                Event::Action(Action::Move(Move::Right)) if !self.wrap => self.pan += PAN,
+                Event::Action(Action::Move(Move::Right)) if !self.wrap => self.pan = (self.pan + PAN).min(view::PAN_MAX),
                 Event::Action(Action::Move(Move::Left)) if !self.wrap => self.pan = self.pan.saturating_sub(PAN),
                 Event::Action(Action::Move(Move::Home)) => self.pan = 0,
+                // A sideways wheel or touchpad scroll over the diff (positive: the content
+                // moves right, as a scroll does).
+                Event::Wheel { id, dx, .. } if id == LINES && !self.wrap => self.wheel(*dx),
                 // Opened over another module (the git graph's Space): back to it.
                 Event::Action(Action::Back) if input.opened_from.is_some() => self.back = true,
                 _ => {}
@@ -388,6 +394,14 @@ impl DiffMod {
                 self.reveal_selected();
             }
         }
+    }
+
+    /// Scrolls the code sideways by a wheel's `dx` points, whole characters at a time.
+    fn wheel(&mut self, dx: f32) {
+        let chars = self.pan as f32 + self.pan_part - dx / view::CHAR;
+        let chars = chars.clamp(0.0, view::PAN_MAX as f32);
+        self.pan = chars.floor() as usize;
+        self.pan_part = chars - self.pan as f32;
     }
 
     /// Scrolls the file list to the selected file if it's out of sight (rows at the

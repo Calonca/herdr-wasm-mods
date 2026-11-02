@@ -23,7 +23,9 @@ const NARROW: f32 = 640.0;
 /// Below this width the header's toggles go on a second row.
 const TWO_ROWS: f32 = 820.0;
 /// A character of the code font, in points (for the wrapping width).
-const CHAR: f32 = CODE_SIZE * 0.6;
+pub(crate) const CHAR: f32 = CODE_SIZE * 0.6;
+/// The farthest the code scrolls sideways, in characters.
+pub(crate) const PAN_MAX: usize = 4000;
 
 /// The colours the diff uses, from the theme.
 struct Palette {
