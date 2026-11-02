@@ -33,6 +33,7 @@ jobs:
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Test the host
+        timeout-minutes: 15
         run: cargo test --locked -p wasm-mods-host
 
       - name: Build both
