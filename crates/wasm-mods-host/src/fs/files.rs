@@ -191,6 +191,13 @@ impl Files {
                             events.push(FsWatchEvent { id: id.clone(), change: FsChange::Created { name: name.clone() } });
                         }
                     }
+                    // Still there under its name, but rewritten (or replaced by a rename
+                    // over it): its size or time changed. Told as Created: it's new content.
+                    for (name, now) in new {
+                        if old.get(name).is_some_and(|before| before != now) {
+                            events.push(FsWatchEvent { id: id.clone(), change: FsChange::Created { name: name.clone() } });
+                        }
+                    }
                 }
                 _ => {
                     let old = w.stat.as_ref();
@@ -347,6 +354,38 @@ mod tests {
         // Outside the grant: refused.
         let (reply, _) = f.run("x", &FsOp::Open { path: "/etc/passwd".into() }, &roots).unwrap();
         assert!(matches!(reply, FsReply::Error(e) if e.starts_with("not allowed")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder watch sees a file rewritten under its name (same size, as a status
+    /// file rewritten every second) and one replaced by a rename over it.
+    #[test]
+    fn folder_watches_see_files_rewritten_or_renamed_over() {
+        let dir = std::env::temp_dir().join(format!("wasm-mods-rewrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let roots = [Root { dir: dir.clone(), only: None, read: true, write: false }];
+        let at = |secs| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let write = |name: &str, text: &str, secs| {
+            std::fs::write(dir.join(name), text).unwrap();
+            File::options().write(true).open(dir.join(name)).unwrap().set_modified(at(secs)).unwrap();
+        };
+        write("status.json", "{\"n\":1}", 1_000);
+        write("other", "x", 1_000);
+        let mut f = Files::default();
+        f.run("w", &FsOp::Watch { path: dir.to_str().unwrap().into() }, &roots).unwrap();
+        assert!(f.poll(&roots).is_empty());
+        // Rewritten in place, the same size.
+        write("status.json", "{\"n\":2}", 1_001);
+        assert_eq!(f.poll(&roots), vec![FsWatchEvent { id: "w".into(), change: FsChange::Created { name: "status.json".into() } }]);
+        assert!(f.poll(&roots).is_empty());
+        // Replaced by a rename over it (an atomic save).
+        write(".status.tmp", "{\"n\":33}", 1_002);
+        let _ = f.poll(&roots);
+        std::fs::rename(dir.join(".status.tmp"), dir.join("status.json")).unwrap();
+        let events = f.poll(&roots);
+        assert!(events.contains(&FsWatchEvent { id: "w".into(), change: FsChange::Created { name: "status.json".into() } }), "{events:?}");
+        assert!(!events.iter().any(|e| e.change == FsChange::Created { name: "other".into() }), "{events:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

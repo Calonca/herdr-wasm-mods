@@ -134,7 +134,9 @@ pub enum FsChange {
     /// The watched file's contents or size changed: from `old_size` to `new_size` (a
     /// growing log: read `old_size..new_size`).
     Changed { old_size: u64, new_size: u64, modified: Option<f64> },
-    /// An entry of the watched folder appeared, went away or was renamed.
+    /// An entry of the watched folder appeared, went away or was renamed. `Created` also
+    /// comes for an entry still there under its name whose size or time changed: a file
+    /// rewritten in place, or replaced by another renamed over it (an atomic save).
     Created { name: String },
     Deleted { name: String },
     Renamed { from: String, to: String },
