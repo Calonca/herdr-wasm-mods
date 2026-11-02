@@ -105,7 +105,7 @@ URL and its SHA-256. A mod folder works wherever you copy it.
 
 1. Add a card from Herdr's gallery, or copy `<card>/mods/<name>/` into
    herdr-app's `mods/` (`~/.config/herdr-app/mods/`, or
-   `$HERDR_APP_HOME/mods/`). The release's `wasm-mods-0.2.0.tar.gz` holds the
+   `$HERDR_APP_HOME/mods/`). The release's `wasm-mods-<version>.tar.gz` holds the
    same mod folders. Then check each one:
    `herdr-app check ~/.config/herdr-app/mods/wasm-todo`.
 2. Show one: `herdr-app do tab.new '{"mod": "wasm-todo"}'`, or put it in a
