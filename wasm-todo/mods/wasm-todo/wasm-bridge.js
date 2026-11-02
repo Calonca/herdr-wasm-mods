@@ -1585,7 +1585,12 @@ export class WasmView extends View {
     if (w.scroll_to && w.scroll_to.revision !== state.revision) {
       state.revision = w.scroll_to.revision;
       const row = Math.min(Number(w.scroll_to.row), Math.max(0, total - 1));
-      state.handle.scroll_to_item(row, "top");
+      // The row goes on top. The handle brings an item to the *near* edge: below the
+      // rows showing that's the bottom one, so it's asked for the row a screenful past
+      // it (less one, for a row cut at the bottom edge).
+      const [at, shown] = (state.sent || "0:0").split(":").map(Number);
+      const to = row > at && shown > 2 ? Math.min(total - 1, row + shown - 2) : row;
+      state.handle.scroll_to_item(to, "top");
     }
     // One height for every row: the list places rows by it, in the script's pixels (the
     // app zooms a list's item sizes, as it does the row). Code (dense, monospace: a
