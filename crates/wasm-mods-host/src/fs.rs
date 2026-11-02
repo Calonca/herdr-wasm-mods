@@ -48,6 +48,8 @@ use crate::permissions::{Capability, Gate};
 mod at;
 mod files;
 pub mod portal;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod osascript;
 
 pub use at::*;
 pub use files::Files;
