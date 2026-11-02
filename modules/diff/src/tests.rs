@@ -74,7 +74,8 @@ fn runs(out: &Output) -> Vec<(String, Vec<String>)> {
 fn reads_the_uncommitted_changes_and_shows_a_file() {
     let mut m = DiffMod::default();
     let waiting = m.update(&Input::default());
-    assert!(waiting.wants.window && waiting.effects.is_empty());
+    // Nothing but the kept toggles asked for until the folder is known.
+    assert!(waiting.wants.window && runs(&waiting).is_empty());
 
     let out = call(&mut m, vec![], vec![]);
     assert_eq!(runs(&out), [("1/head".to_owned(), vec!["rev-parse".into(), "--verify".into(), "--quiet".into(), "HEAD".into()])]);
@@ -162,6 +163,41 @@ diff --git a/last.rs b/last.rs\n--- a/last.rs\n+++ b/last.rs\n@@ -1,3 +1,3 @@\n-
     assert!(parse_diff(parts[4].1).binary);
     // Cut short: the last part is dropped (that file is read on its own).
     assert_eq!(split_diff(out, true).len(), 6);
+}
+
+/// The view toggles kept from the last diff are this one's; a change is written; a
+/// toggle the user changed before they were read stays theirs.
+#[test]
+fn keeps_the_view_toggles() {
+    let kept = |out: &Output| -> Option<serde_json::Value> {
+        out.effects.iter().find_map(|e| match e {
+            Effect::Fs { id, op: FsOp::Write { data, .. } } if id == "settings-save" => {
+                let at = data.start as usize;
+                serde_json::from_slice(&out.bytes[at..at + data.len as usize]).ok()
+            }
+            _ => None,
+        })
+    };
+    let answer = |json: &str| {
+        let data = Blob { start: 0, len: json.len() as u32 };
+        let fs = vec![FsResult { id: "settings".into(), reply: FsReply::Bytes { offset: 0, data, eof: true } }];
+        Input { data: HostData { fs, ..Default::default() }, bytes: json.as_bytes().to_vec(), ..Default::default() }
+    };
+    let mut m = DiffMod::default();
+    let out = m.update(&Input::default());
+    assert!(out.effects.iter().any(|e| matches!(e, Effect::Fs { id, op: FsOp::ReadFile { .. } } if id == "settings")));
+    let out = m.update(&answer(r#"{"side_by_side":true,"wrap":true}"#));
+    assert!(m.side_by_side && m.wrap && !m.all_files && kept(&out).is_none(), "read, not written back");
+    let out = call(&mut m, vec![Event::Action(Action::Key("wrap".into()))], vec![]);
+    assert_eq!(kept(&out), Some(serde_json::json!({"all_files": false, "side_by_side": true, "wrap": false})));
+
+    // Toggled before the file was read: the user's choice stays, and is written.
+    let mut m = DiffMod::default();
+    let _ = m.update(&Input::default());
+    let _ = call(&mut m, vec![Event::Action(Action::Key("all-files".into()))], vec![]);
+    let out = m.update(&answer(r#"{"side_by_side":true}"#));
+    assert!(m.all_files && !m.side_by_side);
+    assert_eq!(kept(&out).map(|k| k["all_files"].clone()), Some(serde_json::json!(true)));
 }
 
 /// Wrapping cuts long lines after a space when it can, and each piece takes a row.

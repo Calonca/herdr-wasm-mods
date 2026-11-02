@@ -218,11 +218,16 @@ is made.
   unpushed, the branch, or one commit (**commit ▾** lists the branch's recent
   commits). A file tree, and each file's diff, unified or side by side,
   syntax-coloured, with the changed words marked. PageUp/PageDown page through
-  it; a shows all files one after another. Asks for `window.folder` and `git`.
+  it; a shows all files one after another. It reads every file's changes at
+  once and colours them in the background, so scrolling finds them ready. Its
+  view toggles (all files, side by side, wrap) are kept for the next diff in
+  `~/.local/share/wasm-mods/diff/settings.json`. Asks for `window.folder`,
+  `git`, and to read and change files in that folder.
 
 `modules/` also holds the sources of two modules that aren't released as mods:
 `hello` (a counter and a canvas, no capabilities: the template for new
-modules) and `git-graph` (a commit graph, an example of `git` and canvases).
+modules) and `git-graph` (a commit graph, an example of `git` and canvases; it
+keeps whether its details show in `~/.local/share/wasm-mods/git-graph/`).
 
 ## Write your own module
 

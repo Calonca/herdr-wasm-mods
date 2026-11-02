@@ -7,7 +7,11 @@
 //! sideways (←/→) or wrap (w). Tab goes to the next file (Shift+Tab back), Enter
 //! (or "refresh") reads it all again; while the window has focus it also looks again
 //! every few seconds. "commit ▾" picks one of the branch's recent commits.
-
+//!
+//! The view toggles (all files, side by side, wrap) are kept in
+//! `~/.local/share/wasm-mods/diff/settings.json` (capabilities `fs.read`/`fs.write` on
+//! that folder), for every diff opened after: this one in its own tab, or the git
+//! graph's. Without them, each diff starts with the toggles off.
 //!
 //! Everything comes from git, run by the host in the tab's folder (capability `git`,
 //! reading commands only): the mod asks with `run_tool("git", …)` and reads the answers
@@ -69,6 +73,31 @@ const COLOURED_MAX: usize = 16 << 20;
 /// The whole range's diff is read at once when it changes at most this many lines; a
 /// bigger one is read a file at a time, as it's shown.
 const ALL_AT_ONCE_MAX: u32 = 200_000;
+/// Where the view toggles are kept.
+const SETTINGS_DIR: &str = "~/.local/share/wasm-mods/diff";
+const SETTINGS_FILE: &str = "~/.local/share/wasm-mods/diff/settings.json";
+
+/// The view toggles, as kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Settings {
+    all_files: bool,
+    side_by_side: bool,
+    wrap: bool,
+}
+
+/// Where the kept toggles are at.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Kept {
+    /// Not asked for yet: the next call does.
+    #[default]
+    Unread,
+    Reading,
+    /// Read (or none kept yet), or last written: a change is written. (A write that
+    /// fails, the folder not allowed, isn't tried again until the next change.)
+    Read(Settings),
+}
+
 /// How often (seconds) it reads the changes again while the window has focus.
 const POLL_SECS: f64 = 4.0;
 
@@ -197,14 +226,23 @@ pub struct DiffMod {
     called_back: bool,
     #[serde(skip)]
     was_busy: bool,
+    /// The kept toggles, and whether the user changed one before they were read (theirs
+    /// win).
+    #[serde(skip)]
+    kept: Kept,
+    #[serde(skip)]
+    toggled: bool,
 }
 
 impl Frame for DiffMod {
     fn update(&mut self, input: &Input) -> Output {
         self.take_answers(input);
+        self.take_settings(input);
         let Some(window) = &input.window else {
             let ui = column([heading("diff"), muted("waiting for the folder: allow this mod to see the tab's folder")]);
-            return Output::new("diff", ui).wants_window();
+            let mut out = Output::new("diff", ui).wants_window();
+            self.keep_settings(&mut out);
+            return out;
         };
         if self.source.is_none() {
             self.source = Some(match input.arg.as_deref() {
@@ -239,6 +277,7 @@ impl Frame for DiffMod {
             out = out.busy();
         }
         self.flush(&mut out);
+        self.keep_settings(&mut out);
         if std::mem::take(&mut self.back) {
             out.effects.push(Effect::Close);
         }
@@ -361,8 +400,48 @@ impl DiffMod {
         }
     }
 
+    /// The view toggles as they are.
+    fn settings(&self) -> Settings {
+        Settings { all_files: self.all_files, side_by_side: self.side_by_side, wrap: self.wrap }
+    }
+
+    /// Takes in the kept toggles, once read: they're the view's, unless the user changed
+    /// one meanwhile.
+    fn take_settings(&mut self, input: &Input) {
+        if let Some(reply) = input.fs_result("settings") {
+            let read = match reply {
+                FsReply::Bytes { data, .. } => serde_json::from_slice::<Settings>(input.blob(*data)).ok(),
+                _ => None,
+            };
+            if let Some(kept) = read
+                && !self.toggled
+            {
+                (self.all_files, self.side_by_side, self.wrap) = (kept.all_files, kept.side_by_side, kept.wrap);
+            }
+            self.kept = Kept::Read(read.unwrap_or_else(|| self.settings()));
+        }
+    }
+
+    /// Asks for the kept toggles the first time; writes them when they change.
+    fn keep_settings(&mut self, out: &mut Output) {
+        match self.kept {
+            Kept::Unread => {
+                out.effects.push(fs::read_file("settings", SETTINGS_FILE));
+                self.kept = Kept::Reading;
+            }
+            Kept::Read(kept) if kept != self.settings() => {
+                let json = serde_json::to_vec(&self.settings()).unwrap_or_default();
+                out.effects.push(fs::create_dir("settings-dir", SETTINGS_DIR));
+                fs::write(out, "settings-save", SETTINGS_FILE, &json);
+                self.kept = Kept::Read(self.settings());
+            }
+            _ => {}
+        }
+    }
+
     /// A header toggle, by name (its pill's id, its key's action).
     fn toggle(&mut self, name: &str) {
+        self.toggled |= matches!(name, "side-by-side" | "wrap" | "all-files");
         match name {
             "side-by-side" => self.side_by_side = !self.side_by_side,
             "wrap" => {
@@ -1011,8 +1090,12 @@ fn failure(r: &ToolResult) -> String {
 }
 
 export_frame!(DiffMod);
-// What it needs: the tab's folder, and git to read it with.
-manifest!(description: "what changed: uncommitted, unpushed, the branch, a commit", capabilities: ["window.folder", "git"]);
+// What it needs: the tab's folder, and git to read it with; a folder to keep its view
+// toggles in.
+manifest!(
+    description: "what changed: uncommitted, unpushed, the branch, a commit",
+    capabilities: ["window.folder", "git", "fs.read:~/.local/share/wasm-mods/diff", "fs.write:~/.local/share/wasm-mods/diff"]
+);
 
 // A plain Rust crate too: `cargo test` runs these natively.
 #[cfg(test)]
