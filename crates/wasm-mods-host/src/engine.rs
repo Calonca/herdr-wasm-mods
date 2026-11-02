@@ -11,7 +11,7 @@
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use wasmtime::{
@@ -85,6 +85,25 @@ fn engine() -> &'static Engine {
 
 /// Milliseconds since the ticker's start at the last call armed ([`arm`]).
 static ARMED: AtomicU64 = AtomicU64::new(0);
+/// Calls running now (armed and not yet returned, however they ended).
+static RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// A call running: counted from [`arm`] until it's dropped (returned, failed or trapped).
+#[must_use]
+struct Running;
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether the ticker may sleep: no call running, and none armed for two seconds. Never
+/// while one runs, however slow the ticks come (a busy machine's 5 ms sleeps can take
+/// far longer, and a call stopped by no tick would run forever).
+fn may_park(running: usize, now_ms: u64, armed_ms: u64) -> bool {
+    running == 0 && now_ms.saturating_sub(armed_ms) > 2000
+}
 
 fn start() -> Instant {
     static START: OnceLock<Instant> = OnceLock::new();
@@ -92,7 +111,8 @@ fn start() -> Instant {
 }
 
 /// The thread that moves the epoch on: every [`TICK`] while calls run, asleep two
-/// seconds after the last (a call never runs that long).
+/// seconds after the last one ended. An [`arm`] wakes it; one that comes between its
+/// check and its sleep isn't lost (`unpark` before `park` makes `park` return).
 fn ticker() -> &'static std::thread::Thread {
     static TICKER: OnceLock<std::thread::Thread> = OnceLock::new();
     TICKER.get_or_init(|| {
@@ -103,7 +123,7 @@ fn ticker() -> &'static std::thread::Thread {
                     std::thread::sleep(TICK);
                     engine().increment_epoch();
                     let now = start().elapsed().as_millis() as u64;
-                    if now.saturating_sub(ARMED.load(Ordering::Relaxed)) > 2000 {
+                    if may_park(RUNNING.load(Ordering::SeqCst), now, ARMED.load(Ordering::Relaxed)) {
                         std::thread::park();
                     }
                 }
@@ -114,11 +134,14 @@ fn ticker() -> &'static std::thread::Thread {
     })
 }
 
-/// Before a call: its deadline, and the ticker awake.
-fn arm(store: &mut Store<StoreLimits>, time: Duration) {
+/// Before a call: its deadline, and the ticker awake until the returned [`Running`] is
+/// dropped.
+fn arm(store: &mut Store<StoreLimits>, time: Duration) -> Running {
+    RUNNING.fetch_add(1, Ordering::SeqCst);
     ARMED.store(start().elapsed().as_millis() as u64, Ordering::Relaxed);
     ticker().unpark();
     store.set_epoch_deadline((time.as_millis() / TICK.as_millis()).max(1) as u64 + 1);
+    Running
 }
 
 fn cache_dir() -> Option<PathBuf> {
@@ -237,7 +260,7 @@ impl Instance {
         let mut store = Store::new(engine(), store_limits);
         store.limiter(|l| l);
         // The start function and the version call share one call's time.
-        arm(&mut store, limits.time);
+        let _running = arm(&mut store, limits.time);
         let instance = Linker::new(engine()).instantiate(&mut store, &module)?;
         let version: TypedFunc<(), u32> = instance.get_typed_func(&mut store, "wm_protocol_version")?;
         let protocol = version.call(&mut store, ())?;
@@ -264,7 +287,7 @@ impl Instance {
     /// One call: `json` (and `side`, raw bytes beside it, for a module exporting
     /// `wm_update_bytes`) in; the answer's JSON and its raw bytes out.
     pub fn call(&mut self, json: &[u8], side: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-        arm(&mut self.store, self.time);
+        let _running = arm(&mut self.store, self.time);
         let ptr = self.put(json)?;
         let len = json.len() as u32;
         match self.update_bytes.clone() {
@@ -284,13 +307,13 @@ impl Instance {
 
     /// The module's state as JSON (kept across a reload of a new build).
     pub fn save(&mut self) -> Result<Vec<u8>> {
-        arm(&mut self.store, self.time);
+        let _running = arm(&mut self.store, self.time);
         let packed = self.save.call(&mut self.store, ())?;
         self.read_packed(packed)
     }
 
     pub fn restore(&mut self, state: &[u8]) -> Result<()> {
-        arm(&mut self.store, self.time);
+        let _running = arm(&mut self.store, self.time);
         let ptr = self.put(state)?;
         Ok(self.restore.call(&mut self.store, (ptr, state.len() as u32))?)
     }
@@ -422,6 +445,16 @@ mod tests {
             v = wasm_mods_protocol::PROTOCOL_VERSION
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn the_ticker_never_sleeps_while_a_call_runs() {
+        // Slow ticks: a call armed 10 s ago and still running keeps the ticker going.
+        assert!(!may_park(1, 12_000, 2_000));
+        assert!(!may_park(3, 60_000, 0));
+        // Idle for two seconds: it sleeps; not before.
+        assert!(may_park(0, 4_001, 2_000));
+        assert!(!may_park(0, 3_000, 2_000));
     }
 
     #[test]
