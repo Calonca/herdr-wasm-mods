@@ -6,7 +6,10 @@
 //! side by side (s), syntax-coloured, with the changed words marked; long lines scroll
 //! sideways (←/→) or wrap (w). Tab goes to the next file (Shift+Tab back), Enter
 //! (or "refresh") reads it all again; while the window has focus it also looks again
-//! every few seconds. "commit ▾" picks one of the branch's recent commits.
+//! every few seconds. "commit ▾" picks one of the branch's recent commits. Opened from
+//! the git graph on a commit, "← older" and "newer →" (or ←/→; Shift+←/→ then scroll
+//! sideways) go to the commit before or after it in the graph's order, on the same file
+//! when that commit changed it too.
 //!
 //! The view toggles (all files, side by side, wrap) are kept in
 //! `~/.local/share/wasm-mods/diff/settings.json` (capabilities `fs.read`/`fs.write` on
@@ -73,6 +76,10 @@ const COLOURED_MAX: usize = 16 << 20;
 /// The whole range's diff is read at once when it changes at most this many lines; a
 /// bigger one is read a file at a time, as it's shown.
 const ALL_AT_ONCE_MAX: u32 = 200_000;
+/// Commits read for going from one to the next, in the git graph's order (every branch,
+/// newest first, children before parents).
+const ORDER_MAX: usize = 20_000;
+
 /// Where the view toggles are kept.
 const SETTINGS_DIR: &str = "~/.local/share/wasm-mods/diff";
 const SETTINGS_FILE: &str = "~/.local/share/wasm-mods/diff/settings.json";
@@ -235,6 +242,12 @@ pub struct DiffMod {
     kept: Kept,
     #[serde(skip)]
     toggled: bool,
+    /// Opened from the git graph: its commits, in its order, once read (to go to the one
+    /// before or after the commit shown).
+    #[serde(skip)]
+    from_graph: bool,
+    #[serde(skip)]
+    order: Vec<String>,
 }
 
 impl Frame for DiffMod {
@@ -257,7 +270,9 @@ impl Frame for DiffMod {
             self.folder = Some(window.folder.clone());
             self.repo = Repo::default();
         }
+        self.from_graph = input.opened_from.as_deref().is_some_and(|f| f.trim_start_matches("wasm-").replace(['-', '_'], " ") == "git graph");
         self.handle(input);
+        self.read_order();
         if self.repo.stage == Stage::Idle {
             self.reload(true);
             self.polled = input.time;
@@ -322,8 +337,15 @@ impl DiffMod {
         let activated_rows: Vec<usize> = input.events.iter()
             .filter_map(|e| match e { Event::Activated { id, index } if id == FILES => Some(*index), _ => None })
             .collect();
+        let stepping = self.steps().is_some() && !input.mods.shift;
         for event in &input.events {
             match event {
+                Event::Clicked { id } if id == "step/older" => self.step(true),
+                Event::Clicked { id } if id == "step/newer" => self.step(false),
+                // From the git graph: ←/→ go to the commit before or after (Shift+←/→
+                // scroll sideways).
+                Event::Action(Action::Move(Move::Left)) if stepping => self.step(true),
+                Event::Action(Action::Move(Move::Right)) if stepping => self.step(false),
                 Event::Clicked { id } => match id.strip_prefix("source/") {
                     Some("uncommitted") => self.set_source(Source::Uncommitted),
                     Some("unpushed") => self.set_source(Source::Unpushed),
@@ -412,6 +434,43 @@ impl DiffMod {
         if count > 0 && (row <= first || row + 2 >= first + count) {
             self.file_rows.scroll_to(row);
         }
+    }
+
+    /// Opened from the git graph on a commit: the commits before (older) and after
+    /// (newer) it in the graph's order, once read; `None` otherwise.
+    pub(crate) fn steps(&self) -> Option<(Option<&str>, Option<&str>)> {
+        let Some(Source::Commit(hash)) = &self.source else { return None };
+        if !self.from_graph {
+            return None;
+        }
+        let at = self.order.iter().position(|c| c.starts_with(hash.as_str()))?;
+        Some((self.order.get(at + 1).map(String::as_str), at.checked_sub(1).map(|i| self.order[i].as_str())))
+    }
+
+    /// Reads the git graph's order of commits, once (opened from it on a commit).
+    fn read_order(&mut self) {
+        if !self.from_graph || !self.order.is_empty() || !matches!(self.source, Some(Source::Commit(_))) {
+            return;
+        }
+        let n = format!("-n{ORDER_MAX}");
+        if self.need("order", &["log", "--all", "--topo-order", "--format=%H", &n, "--"]) {
+            let out = self.repo.got.get("order").and_then(|r| answer(r).ok()).unwrap_or_default();
+            self.order = out.lines().map(str::trim).filter(|h| is_commit_id(h)).map(str::to_owned).collect();
+        }
+    }
+
+    /// Goes to the commit before (`older`) or after the one shown, in the git graph's
+    /// order: the same file stays selected when that commit changed it too, and the view
+    /// toggles stay; it shows from its top and its left edge.
+    fn step(&mut self, older: bool) {
+        let Some((before, after)) = self.steps() else { return };
+        let Some(hash) = (if older { before } else { after }).map(str::to_owned) else { return };
+        let keep = self.selected.clone();
+        self.set_source(Source::Commit(hash));
+        self.selected = keep;
+        self.line_rows.scroll_to(0);
+        self.line_rows.first = 0;
+        self.pan = 0;
     }
 
     /// The view toggles as they are.

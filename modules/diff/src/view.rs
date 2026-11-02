@@ -6,7 +6,7 @@
 //! ends with a quiet rule, the all-files view with a doubled one. Both lists have virtual
 //! rows: only the rows in view (and a margin) are built.
 
-use crate::git::{DiffLine, FileDiff, FileEntry, LineKind, Source, is_commit_id};
+use crate::git::{DiffLine, FileDiff, FileEntry, LineKind, Source, is_commit_id, short};
 use crate::highlight::{Token, Tokens};
 use crate::rows::{Cell, Row, wrap};
 use crate::{DiffMod, FILES, LINES, PICKER, PICKER_POPUP, Stage, tree};
@@ -146,6 +146,16 @@ impl DiffMod {
         };
         let label = commit.as_deref().map_or("commit ▾".to_owned(), |h| format!("{} ▾", Source::Commit(h.to_owned()).name()));
         pills.push(toggle("commits", label, matches!(self.source, Some(Source::Commit(_)))));
+        // Opened from the git graph: the commit before and after, in its order (greyed
+        // out at either end).
+        if let Some((older, newer)) = self.steps() {
+            let step = |id: &str, label: &str, to: Option<&str>| match to {
+                Some(to) => ghost(id, label).tooltip(text(format!("commit {}", short(to)))),
+                None => row([text(label).wrap_mode(Wrap::Extend)]).variant(Variant::Button(ButtonKind::Ghost)).opacity(0.4).wrap(false),
+            };
+            pills.push(step("step/older", "← older", older));
+            pills.push(step("step/newer", "newer →", newer));
+        }
         let toggles = vec![
             toggle("all-files", "all files", self.all_files),
             toggle("side-by-side", "side by side", self.side_by_side),
