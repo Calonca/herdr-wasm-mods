@@ -146,7 +146,8 @@ export function sameHash(a, b) {
   return SHA256.test(x) && x === y;
 }
 
-/** host.lock.json, checked: {host: {version, protocol: [min, max], files: {"linux-x86_64":
+/** host.lock.json, checked: {host: {version, protocol: [min, max], files: {"linux-x86_64"
+ *  (or linux-aarch64, macos-aarch64, macos-x86_64):
  *  {url, sha256, size}, …}, source: {git, tag | rev} | null}, module: {name, protocol,
  *  sha256}}. Throws with what's wrong. URLs must be https:// (file:// for local tests). */
 export function parseLock(text) {
@@ -160,7 +161,7 @@ export function parseLock(text) {
   }
   const files = {};
   for (const [target, f] of Object.entries(h.files ?? {})) {
-    if (!/^linux-(x86_64|aarch64)$/.test(target)) continue;
+    if (!/^(linux|macos)-(x86_64|aarch64)$/.test(target)) continue;
     if (!/^(https:\/\/|file:\/\/\/)[^\s]+$/.test(f?.url ?? "")) throw new Error(`host.lock.json: ${target}'s url must be https://`);
     if (!SHA256.test(String(f.sha256 ?? "").toLowerCase())) throw new Error(`host.lock.json: ${target}'s sha256 isn't 64 hex digits`);
     files[target] = { url: f.url, sha256: f.sha256.toLowerCase(), size: Number(f.size) || null };
@@ -195,16 +196,32 @@ export function shouldTakeOver(running, best, hosts, protocol) {
   return !fits(info, protocol) || compareVersions(best.version, running.version) > 0;
 }
 
-/** This machine, as host.lock.json names it (`linux-x86_64`), else null. */
-export async function target() {
-  const s = await exec("uname", ["-sm"]);
-  const [os, arch] = String(s.stdout ?? "").trim().split(/\s+/);
-  return os === "Linux" && ["x86_64", "aarch64"].includes(arch) ? `linux-${arch}` : null;
+/** A machine as host.lock.json names it, from `uname -sm` ("Linux x86_64" →
+ *  `linux-x86_64`, "Darwin arm64" → `macos-aarch64`), else null. */
+export function parseTarget(unameSm) {
+  const [os, arch] = String(unameSm ?? "").trim().split(/\s+/);
+  const a = arch === "arm64" ? "aarch64" : arch;
+  if (!["x86_64", "aarch64"].includes(a)) return null;
+  return os === "Linux" ? `linux-${a}` : os === "Darwin" ? `macos-${a}` : null;
 }
 
+/** This machine, as host.lock.json names it (`linux-x86_64`), else null. Asked once. */
+export function target() {
+  return (globalThis.__wasmModsTarget ??= exec("uname", ["-sm"]).then((s) => parseTarget(s.stdout))
+    .catch((e) => { delete globalThis.__wasmModsTarget; throw e; }));
+}
+
+/** On macOS: its own forms of the commands below (BSD stat and mv, shasum, open). */
+const onMac = async () => String((await target().catch(() => null)) ?? "").startsWith("macos-");
+
 async function sha256(path) {
-  const r = await exec("sha256sum", [path]);
+  const r = (await onMac()) ? await exec("shasum", ["-a", "256", path]) : await exec("sha256sum", [path]);
   return r.code === 0 ? parseSha256sum(r.stdout) : null;
+}
+
+/** Opens a link or a file with the desktop's own handler. */
+async function openWithDesktop(target) {
+  return exec((await onMac()) ? "open" : "xdg-open", [target]);
 }
 
 /** The lock of mod folder `folder`, or the core's, parsed (null if neither has one). */
@@ -306,7 +323,9 @@ export async function placeHost(file, version) {
     if (r.code !== 0) { await exec("rm", ["-rf", tmp]); throw new Error(`can't install the host: ${r.stderr}`); }
   }
   // -T: fails if the version is there already (another copy won): then that one stays.
-  await exec("mv", ["-T", tmp, `${HOSTS()}/${version}`]);
+  // macOS's mv has no -T: it moves only if the version isn't there.
+  if (await onMac()) await exec("sh", ["-c", '[ -e "$1" ] || mv "$0" "$1"', tmp, `${HOSTS()}/${version}`]);
+  else await exec("mv", ["-T", tmp, `${HOSTS()}/${version}`]);
   await exec("rm", ["-rf", tmp]);
   hostsChanged();
 }
@@ -315,6 +334,7 @@ export async function placeHost(file, version) {
  *  lock's. True if it was. */
 async function installBundled(folder, lock, tgt) {
   const want = lock.host.files[tgt]?.sha256;
+  // Named as the release names it: wasm-mods-host-x86_64 (Linux), wasm-mods-host-macos-aarch64.
   const file = `${MOD_DIR(folder)}/bin/wasm-mods-host-${tgt.replace("linux-", "")}`;
   if (!want || !sameHash(await sha256(file), want)) return false;
   await placeHost(file, lock.host.version);
@@ -353,7 +373,8 @@ export async function downloadHost(lock, tgt) {
 
 /** Whether this machine can build the host: cargo, and the wasm32 target (for modules). */
 async function canBuild() {
-  const r = await exec("sh", ["-c", "command -v cargo >/dev/null && rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown"]);
+  // An app started from the macOS Dock doesn't get the shell's PATH.
+  const r = await exec("sh", ["-c", 'PATH="$HOME/.cargo/bin:$PATH"; command -v cargo >/dev/null && rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown']);
   return r.code === 0;
 }
 
@@ -367,7 +388,7 @@ export async function buildHost(cx, lock, progress) {
   const cmd = ["cargo", "install", "--locked", "--git", src.git, ...ref, "--root", dir, "wasm-mods-host"];
   const quoted = cmd.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
   const r = await hc(["run", "--bg", "--json", "--no-parent", "--rm", "--", "sh", "-c",
-    `${quoted} > '${dir}/build.log' 2>&1; echo $? > '${dir}/done'`]);
+    `PATH="$HOME/.cargo/bin:$PATH"; ${quoted} > '${dir}/build.log' 2>&1; echo $? > '${dir}/done'`]);
   if (r.code !== 0) throw new Error(`can't start the build: ${r.stderr || r.stdout}`);
   for (let i = 0; ; i++) {
     const done = await readTextFile(`${dir}/done`).catch(() => null);
@@ -472,7 +493,7 @@ async function findHost(cx, protocol, need) {
     if ((await exec("mkdir", [lock])).code !== 0) {
       // Another copy is starting one; a start that never finished (its copy closed) is
       // taken over.
-      const age = await exec("stat", ["-c", "%Y", lock]);
+      const age = await exec("stat", (await onMac()) ? ["-f", "%m", lock] : ["-c", "%Y", lock]);
       if (age.code === 0 && Date.now() / 1000 - Number(age.stdout) > START_MAX / 1000) {
         await exec("rmdir", [lock]);
       }
@@ -1066,7 +1087,7 @@ export class WasmView extends View {
         run("tab.new", has ? { space, name, mod: own, props: extra } : { space, name, mod: "wasm-mods", props: { module: msg.open.module, ...extra } });
       });
     } else if (msg.open_url) {
-      exec("xdg-open", [msg.open_url.url]);
+      openWithDesktop(msg.open_url.url);
     }
   }
 
@@ -1469,7 +1490,7 @@ export class WasmView extends View {
         if (s.link && !ctx?.virtual) {
           const target = s.link;
           span = span.id(`link-${i}-${target}`).cursor_pointer().hover((st) => st.underline()).tooltip(target)
-            .on_click(() => { if (/^(https?:\/\/|file:\/\/|\/|~\/)/.test(target)) exec("xdg-open", [target.replace(/^~\//, `${home()}/`)]); });
+            .on_click(() => { if (/^(https?:\/\/|file:\/\/|\/|~\/)/.test(target)) openWithDesktop(target.replace(/^~\//, `${home()}/`)); });
         }
         return span;
       }));

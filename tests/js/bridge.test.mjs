@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
-  compareVersions, fits, folderOf, installedName, pickHost, parseLock, parseSha256sum, sameHash, parseRunFile, shouldTakeOver,
+  compareVersions, fits, folderOf, installedName, pickHost, parseLock, parseSha256sum, parseTarget, sameHash, parseRunFile, shouldTakeOver,
 } from "../../wasm-mods/mods/wasm-mods/wasm-bridge.js";
 
 const H = (version, min, max) => ({ version, protocol: [min, max], path: `/h/${version}` });
@@ -102,4 +102,25 @@ test("a mod folder's module is installed under the folder's name", () => {
   assert.equal(installedName("wasm-diff"), "wasm-diff");
   assert.equal(installedName("Someone's Diff 2"), "someone-s-diff-2");
   assert.notEqual(installedName("wasm-diff"), installedName("wasm-diff-2"));
+});
+
+test("this machine as a lock names it: Linux and macOS, x86_64 and aarch64", () => {
+  assert.equal(parseTarget("Linux x86_64\n"), "linux-x86_64");
+  assert.equal(parseTarget("Linux aarch64"), "linux-aarch64");
+  assert.equal(parseTarget("Darwin arm64\n"), "macos-aarch64");
+  assert.equal(parseTarget("Darwin x86_64"), "macos-x86_64");
+  assert.equal(parseTarget("Linux armv7l"), null);
+  assert.equal(parseTarget("FreeBSD amd64"), null);
+  assert.equal(parseTarget(""), null);
+});
+
+test("host.lock.json: macOS entries are read beside the Linux ones", () => {
+  const f = (name) => ({ url: `https://example.org/${name}`, sha256: SUM, size: 1 });
+  const lock = parseLock(JSON.stringify({ host: { version: "0.3.0", protocol: [4, 5], files: {
+    "linux-x86_64": f("wasm-mods-host-x86_64"), "macos-aarch64": f("wasm-mods-host-macos-aarch64"),
+    "macos-x86_64": f("wasm-mods-host-macos-x86_64"), "windows-x86_64": f("w"),
+  } }, module: null }));
+  assert.deepEqual(Object.keys(lock.host.files).sort(), ["linux-x86_64", "macos-aarch64", "macos-x86_64"]);
+  assert.throws(() => parseLock(JSON.stringify({ host: { version: "0.3.0", protocol: [4, 5], files: {
+    "macos-aarch64": { url: "http://x/y", sha256: SUM } } }, module: null })), /url must be https/);
 });
