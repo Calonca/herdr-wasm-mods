@@ -47,6 +47,9 @@ jobs:
         run: |
           cd dist
           for f in wasm-mods-host-macos-*; do
+            # Apple's linker signs (ad hoc) only the build for the runner's own
+            # architecture; the x86_64 one comes out unsigned, and macOS won't run that.
+            codesign --sign - --force "$f"
             codesign --verify --verbose "$f"
             lipo -info "$f"
           done
