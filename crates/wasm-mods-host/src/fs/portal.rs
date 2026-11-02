@@ -1,17 +1,21 @@
 //! The desktop's own file chooser, for [`FsOp::PickFile`], [`FsOp::PickFolder`] and
-//! [`FsOp::PickSave`]: asked through the XDG desktop portal
+//! [`FsOp::PickSave`]: on Linux asked through the XDG desktop portal
 //! (`org.freedesktop.portal.FileChooser` on the session bus), so it's the dialog the
-//! user knows (KDE's, GNOME's). Only what they choose becomes the module's to reach
+//! user knows (KDE's, GNOME's); on macOS the system's own, through `osascript`. Only what they choose becomes the module's to reach
 //! ([`Files::picked`](super::Files::picked)); the module never sees the dialog, only
 //! the answer. The dialog runs on its own thread: the answer comes in a later call.
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
 use wasm_mods_protocol::{FsKind, FsOp, FsReply};
+#[cfg(target_os = "linux")]
 use zbus::blocking::{Connection, MessageIterator};
+#[cfg(target_os = "linux")]
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use super::{Root, display, home};
@@ -60,16 +64,32 @@ pub fn pick(module: &str, ask: Ask) -> mpsc::Receiver<Picked> {
         Ask::Save { .. } => format!("{module}: save as"),
     };
     std::thread::spawn(move || {
-        let chosen = Connection::session()
-            .map_err(|e| format!("no session bus for the file chooser: {e}"))
-            .and_then(|conn| choose(&conn, &title, &ask));
+        let chosen = choose_here(&title, &ask);
         let _ = tx.send(answer(&ask, chosen));
     });
     rx
 }
 
+#[cfg(target_os = "linux")]
+fn choose_here(title: &str, ask: &Ask) -> Result<Option<Vec<String>>, String> {
+    Connection::session()
+        .map_err(|e| format!("no session bus for the file chooser: {e}"))
+        .and_then(|conn| choose(&conn, title, ask))
+}
+
+#[cfg(target_os = "macos")]
+fn choose_here(title: &str, ask: &Ask) -> Result<Option<Vec<String>>, String> {
+    super::osascript::choose(title, ask)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn choose_here(_title: &str, _ask: &Ask) -> Result<Option<Vec<String>>, String> {
+    Err("no file chooser on this system".into())
+}
+
 /// Asks the portal on `conn` and waits for the user: the chosen URIs, or `None` when
 /// they cancelled.
+#[cfg(target_os = "linux")]
 pub fn choose(conn: &Connection, title: &str, ask: &Ask) -> Result<Option<Vec<String>>, String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let token = format!("wasm_mods_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
@@ -208,6 +228,7 @@ mod tests {
 
     /// The whole exchange against a stand-in portal over a socket pair: the request,
     /// its options, and the Response signal on the request's handle.
+    #[cfg(target_os = "linux")]
     #[test]
     #[allow(deprecated)] // unix_stream: this build has no tokio
     fn asks_the_portal_and_reads_its_answer() {

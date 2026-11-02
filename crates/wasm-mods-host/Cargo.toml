@@ -15,9 +15,14 @@ serde_json.workspace = true
 sha2.workspace = true
 toml.workspace = true
 libc.workspace = true
+
+# The file chooser (the XDG desktop portal).
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true
 
 [dev-dependencies]
 wat.workspace = true
+
 # A stand-in portal over a socket pair, in the tests.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 zbus = { workspace = true, features = ["p2p"] }

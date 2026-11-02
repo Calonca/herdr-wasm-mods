@@ -23,12 +23,15 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
 pmax=$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9]*\);/\1/p' "$root/crates/wasm-mods-protocol/src/lib.rs")
 pmin=$(sed -n 's/^pub const PROTOCOL_MIN: u32 = \([0-9]*\);/\1/p' "$root/crates/wasm-mods-protocol/src/lib.rs")
 hostdir="$share/host/$version"
+# Linux or macOS: their own forms of a few commands.
+case $(uname -s) in Darwin) os=macos ;; *) os=linux ;; esac
+sha256() { if [ $os = macos ]; then shasum -a 256 "$1"; else sha256sum "$1"; fi | cut -d' ' -f1; }
 mkdir -p "$bin" "$modules" "$hostdir" "$app/mods"
 "$root/scripts/sync-bridge.sh" --check
 install -m 755 "$root/target/release/wasm-mods-host" "$hostdir/.wasm-mods-host.new"
 mv -f "$hostdir/.wasm-mods-host.new" "$hostdir/wasm-mods-host"
 # The command line's (and older setups') path. A file there from before is replaced.
-ln -sfn "$hostdir/wasm-mods-host" "$bin/.wasm-mods-host.new" && mv -Tf "$bin/.wasm-mods-host.new" "$bin/wasm-mods-host"
+ln -sfn "$hostdir/wasm-mods-host" "$bin/.wasm-mods-host.new" && if [ $os = macos ]; then mv -f "$bin/.wasm-mods-host.new" "$bin/wasm-mods-host"; else mv -Tf "$bin/.wasm-mods-host.new" "$bin/wasm-mods-host"; fi
 if [ $# -eq 0 ]; then set -- $(cd "$built" && ls *.wasm | sed 's/\.wasm$//'); fi
 for name in "$@"; do
   file=$(echo "$name" | tr - _)
@@ -37,11 +40,11 @@ for name in "$@"; do
   mv -f "$modules/.$file.wasm.new" "$modules/$file.wasm"
   echo "module $file"
 done
-arch=$(uname -m)
-sum=$(sha256sum "$hostdir/wasm-mods-host" | cut -d' ' -f1); size=$(stat -L -c %s "$hostdir/wasm-mods-host")
+arch=$(uname -m); [ "$arch" = arm64 ] && arch=aarch64
+sum=$(sha256 "$hostdir/wasm-mods-host"); size=$(wc -c < "$hostdir/wasm-mods-host" | tr -d ' ')
 lock() {
-  printf '{\n  "host": {"version": "%s", "protocol": [%s, %s], "files": {"linux-%s": {"url": "file://%s", "sha256": "%s", "size": %s}}, "source": null},\n  "module": %s\n}\n' \
-    "$version" "$pmin" "$pmax" "$arch" "$hostdir/wasm-mods-host" "$sum" "$size" "$1"
+  printf '{\n  "host": {"version": "%s", "protocol": [%s, %s], "files": {"%s-%s": {"url": "file://%s", "sha256": "%s", "size": %s}}, "source": null},\n  "module": %s\n}\n' \
+    "$version" "$pmin" "$pmax" "$os" "$arch" "$hostdir/wasm-mods-host" "$sum" "$size" "$1"
 }
 for dir in "$root"/*/mods/wasm-*/; do
   dir=${dir%/}; name=$(basename "$dir")
@@ -53,7 +56,7 @@ for dir in "$root"/*/mods/wasm-*/; do
   if [ "$name" != wasm-mods ]; then
     m=$(echo "${name#wasm-}" | tr - _)
     cp "$built/$m.wasm" "$app/mods/$name/$m.wasm"
-    module="{\"name\": \"$m\", \"protocol\": $pmax, \"sha256\": \"$(sha256sum "$built/$m.wasm" | cut -d' ' -f1)\"}"
+    module="{\"name\": \"$m\", \"protocol\": $pmax, \"sha256\": \"$(sha256 "$built/$m.wasm")\"}"
   fi
   lock "$module" > "$app/mods/$name/host.lock.json"
   echo "mod $name"
