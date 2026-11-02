@@ -76,7 +76,8 @@ git config says. A module can't run any other program.
   allowed folder to a file outside it is readable, as on any Unix; a bind mount
   is followed like a folder.
 - **Files you pick are yours to give.** A module may open the desktop's own file
-  chooser (the XDG portal); what you pick is readable for that session only.
+  chooser (the XDG portal on Linux, the system's on macOS); what you pick is
+  readable for that session only.
 - **Limits on every call.** A module gets 500 ms and 256 MB per call; past
   that it stops.
 
@@ -130,15 +131,19 @@ version, and every WASM mod on this machine shares it:
 - A mod copies its `.wasm` into `~/.local/share/wasm-mods/modules/` when that
   copy differs.
 
-Linux only. Each release pins hosts for x86_64 and aarch64, from
+Linux and macOS. Each release pins hosts for Linux x86_64 and aarch64, and
+for macOS (Apple silicon and Intel) when they were built for it (see
+RELEASING.md), from
 `https://github.com/Calonca/herdr-wasm-mods/releases/download/v<version>/`.
-The aarch64 host is built and checked but untested on real aarch64 hardware.
+Where a release has no host for the machine, **Build from source** builds it
+with cargo. The Linux aarch64 host is built and checked but untested on real
+aarch64 hardware.
 The host runs on the machine the window runs on. A tab on another machine
 needs nothing installed there: its git runs through `hc exec --on`.
 
 ### From source
 
-Linux, with Rust 1.97 or newer and its `wasm32-unknown-unknown` target:
+Linux or macOS, with Rust 1.97 or newer and its `wasm32-unknown-unknown` target:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -166,10 +171,11 @@ is made.
     to it over `127.0.0.1` on a port the system picks, with a random token, one
     connection per pane. The token goes through a file in a folder only you can
     open (`~/.cache/wasm-mods/run/`), never on a command line;
-  - run small programs for that: `sha256sum`, `uname`, `cp`, `mv`, `mkdir`,
-    `stat`, and `curl` or `cargo` only when you click Download or Build from
-    source;
-  - open a link a module offers with `xdg-open` when you click it.
+  - run small programs for that: `sha256sum` (`shasum` on macOS), `uname`,
+    `cp`, `mv`, `mkdir`, `stat`, and `curl` or `cargo` only when you click
+    Download or Build from source;
+  - open a link a module offers with `xdg-open` (`open` on macOS) when you
+    click it.
 - **`wasm-mods-host`** runs the modules with wasmtime (no WASI: a module has no
   imports at all) and does what they're allowed to:
   - reads and writes files only inside folders you allowed, as above;

@@ -1,0 +1,78 @@
+# The host for macOS (Apple silicon and Intel), built on a Mac with Apple's own
+# toolchain, tested there, and checked: signed (ad hoc, as the linker signs it),
+# its --version, and its sha256s (SHA256SUMS-macos).
+#
+# - Run by hand (Actions → macOS hosts → Run workflow, on the commit to release): the
+#   builds come as an artifact. Put them in dist/host before scripts/package.sh, so the
+#   locks pin them (RELEASING.md).
+# - On a pushed tag vX.Y.Z: the same builds are also added to that tag's release, if it
+#   exists and doesn't have them yet. Those aren't the ones the tag's locks pin (if any).
+name: macOS hosts
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Test the host
+        run: cargo test --locked -p wasm-mods-host
+
+      - name: Build both
+        run: |
+          mkdir -p dist
+          for arch in aarch64 x86_64; do
+            cargo build --release --locked -p wasm-mods-host --target $arch-apple-darwin
+            cp target/$arch-apple-darwin/release/wasm-mods-host dist/wasm-mods-host-macos-$arch
+          done
+
+      - name: Check them
+        run: |
+          cd dist
+          for f in wasm-mods-host-macos-*; do
+            codesign --verify --verbose "$f"
+            lipo -info "$f"
+          done
+          ./wasm-mods-host-macos-aarch64 --version --json
+          shasum -a 256 wasm-mods-host-macos-* > SHA256SUMS-macos
+          cat SHA256SUMS-macos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-mods-host-macos
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Add them to the tag's release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "no release $TAG yet: the builds are in the artifact"; exit 0
+          fi
+          have=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for f in dist/*; do
+            if printf '%s\n' "$have" | grep -qx "$(basename "$f")"; then
+              echo "$(basename "$f") is there already: kept"
+            else
+              gh release upload "$TAG" "$f"
+            fi
+          done

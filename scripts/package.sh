@@ -27,11 +27,14 @@ pmin=$(sed -n 's/^pub const PROTOCOL_MIN: u32 = \([0-9]*\);/\1/p' "$root/crates/
 built="$root/modules/target/wasm32-unknown-unknown/release"
 "$root/scripts/sync-bridge.sh" --check
 files=""
-for arch in x86_64 aarch64; do
-  f="$hosts/wasm-mods-host-$arch"
-  if [ ! -f "$f" ]; then echo "skipping $arch: no $f" >&2; continue; fi
+# Linux: wasm-mods-host-<arch>; macOS: wasm-mods-host-macos-<arch> (built on a Mac, see
+# RELEASING.md). A build that isn't in the folder gets no entry.
+for target in linux-x86_64 linux-aarch64 macos-aarch64 macos-x86_64; do
+  name=wasm-mods-host-${target#linux-}
+  f="$hosts/$name"
+  if [ ! -f "$f" ]; then echo "skipping $target: no $f" >&2; continue; fi
   sum=$(sha256sum "$f" | cut -d' ' -f1); size=$(stat -c %s "$f")
-  files="$files${files:+,}\"linux-$arch\": {\"url\": \"${base%/}/wasm-mods-host-$arch\", \"sha256\": \"$sum\", \"size\": $size}"
+  files="$files${files:+,}\"$target\": {\"url\": \"${base%/}/$name\", \"sha256\": \"$sum\", \"size\": $size}"
 done
 [ -n "$files" ] || { echo "no host builds in $hosts" >&2; exit 1; }
 source=null
@@ -59,7 +62,7 @@ for dir in "$root"/*/mods/wasm-*/; do
   cp -r "$dir" "$pack/$name"
   if [ "${BUNDLE:-}" = 1 ]; then
     mkdir -p "$pack/$name/bin"
-    for arch in x86_64 aarch64; do [ -f "$hosts/wasm-mods-host-$arch" ] && cp "$hosts/wasm-mods-host-$arch" "$pack/$name/bin/"; done
+    for b in x86_64 aarch64 macos-aarch64 macos-x86_64; do [ -f "$hosts/wasm-mods-host-$b" ] && cp "$hosts/wasm-mods-host-$b" "$pack/$name/bin/"; done
   fi
   echo "$name"
 done
