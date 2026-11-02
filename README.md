@@ -43,6 +43,7 @@ What a module can ask for:
 | `fs.write:<folder>` | write, make folders and delete inside that folder |
 | `window.folder` | know the folder and git branch of the tab it's shown in |
 | `git` | run git in that folder, read-only commands only |
+| `glab` | read that repo's GitLab projects with `glab api projects/…`, GET only |
 
 ### The git permission
 
@@ -58,7 +59,17 @@ The host runs git for it, with no shell, and only reading subcommands (`log`,
 `show`, `diff`, `status`, `rev-parse`, …). Options that would write a file, run
 another program or read outside the repo are refused, and external diff
 drivers, text conversion, fsmonitor and the pager are turned off whatever your
-git config says. A module can't run any other program.
+git config says. A module can't run any other program but `glab`, below.
+
+### The glab permission
+
+`glab` lets a module read GitLab for the repo in the tab's folder (its issues,
+merge requests, pipelines, …) through your own `glab` login. Like `git` it runs
+only in that folder, so it comes with `window.folder`. The host runs only
+`glab api <path>`, with no shell: a GET, with no method, fields or other
+options, and only for paths under `projects/` (none that climb out with `..`).
+Anything else is refused, and the module is told why. Prompts and the pager
+are off. It reads whatever your login can read under `projects/`.
 
 - **Nothing is granted without asking.** A module without a manifest gets
   nothing. A capability it uses without declaring it is refused. One this host
@@ -184,8 +195,11 @@ is made.
     write a file, run another program or read outside the repo are refused, and
     external diff drivers, text conversion, fsmonitor and the pager are turned
     off whatever your git config says. Each run has a time and output limit;
-  - for a tab on another machine (a Herdr space's machine), runs that git there
-    with `hc exec --on <machine>`, under the same rules.
+  - runs `glab api projects/…` only for a module allowed `glab`, in the tab's
+    folder: a GET, no other subcommand, method, field or option, and no path
+    outside `projects/`. Same limits as git;
+  - for a tab on another machine (a Herdr space's machine), runs that git or
+    glab there with `hc exec --on <machine>`, under the same rules.
 - **What they keep:** the hosts in `~/.local/share/wasm-mods/host/`, the
   modules in `~/.local/share/wasm-mods/modules/`, your answers in
   `~/.config/wasm-mods/permissions.toml`, compiled modules in

@@ -33,6 +33,9 @@ pub enum Capability {
     WindowFolder,
     /// Run git there, only commands that read (history, changes, files at a commit).
     Git,
+    /// Run `glab api projects/…` there: GitLab's API for that repo, reading only, as the
+    /// user's own glab login.
+    Glab,
     /// Declared but not provided here (another host's, or one for later): never granted
     /// and never asked.
     Unavailable(String),
@@ -84,6 +87,7 @@ impl Capability {
         match s {
             "window.folder" => Self::WindowFolder,
             "git" => Self::Git,
+            "glab" => Self::Glab,
             _ => match s.split_once(':') {
                 Some(("fs.read", dir)) if fs_dir_ok(dir) => Self::FsRead(dir.into()),
                 Some(("fs.write", dir)) if fs_dir_ok(dir) => Self::FsWrite(dir.into()),
@@ -98,6 +102,7 @@ impl Capability {
             Self::FsWrite(dir) => format!("fs.write:{dir}"),
             Self::WindowFolder => "window.folder".into(),
             Self::Git => "git".into(),
+            Self::Glab => "glab".into(),
             Self::Unavailable(s) => s.clone(),
         }
     }
@@ -109,6 +114,7 @@ impl Capability {
             Self::FsWrite(dir) => format!("change files in {}", resolved(dir)),
             Self::WindowFolder => "know the folder and git branch of the tab it's in".into(),
             Self::Git => "read the git history and changes of that folder".into(),
+            Self::Glab => "read that repo's GitLab projects (issues, merge requests, pipelines) as you".into(),
             Self::Unavailable(s) => format!("{s} (not available here)"),
         }
     }
@@ -466,6 +472,7 @@ mod tests {
     fn capabilities_parse_and_folders_are_checked() {
         assert_eq!(Capability::parse("fs.read:~/notes"), Capability::FsRead("~/notes".into()));
         assert_eq!(Capability::parse(" git "), Capability::Git);
+        assert_eq!(Capability::parse("glab"), Capability::Glab);
         for bad in ["fs.read:", "fs.read:notes", "fs.read:~/a/../..", "fs.write:/tmp/\u{202e}x", "fs.read:~/a\u{200b}"] {
             assert!(matches!(Capability::parse(bad), Capability::Unavailable(_)), "{bad}");
         }
