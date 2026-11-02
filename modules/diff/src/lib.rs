@@ -163,6 +163,18 @@ impl Repo {
     }
 }
 
+/// A row of the commit list ("commit ▾").
+pub(crate) struct PickerEntry {
+    pub hash: String,
+    /// How long ago, as git says it.
+    pub when: String,
+    pub subject: String,
+    /// The commit the diff shows.
+    pub shown: bool,
+    /// Where HEAD is.
+    pub head: bool,
+}
+
 /// What the rows depend on: all files, side by side, the file (one-file view), the
 /// wrapping width, the diffs read.
 type RowKey = (bool, bool, Option<String>, Option<usize>, u64);
@@ -211,6 +223,9 @@ pub struct DiffMod {
     line_rows: VirtualRows,
     #[serde(skip)]
     picker_rows: VirtualRows,
+    /// The commit list was scrolled to the commit shown since it opened.
+    #[serde(skip)]
+    picker_placed: bool,
     #[serde(skip)]
     polled: f64,
     #[serde(skip)]
@@ -352,7 +367,10 @@ impl DiffMod {
                     Some("branch") => self.set_source(Source::Branch),
                     Some(hash) if is_commit_id(hash) => self.set_source(Source::Commit(hash.to_owned())),
                     _ if id == "refresh" => self.reload(true),
-                    _ if id == "commits" => self.picking = !self.picking,
+                    _ if id == "commits" => {
+                        self.picking = !self.picking;
+                        self.picker_placed = false;
+                    }
                     _ => match id.strip_prefix("fold/") {
                         Some(path) => self.fold(path),
                         // A click on a folder's row in the file list: it opens or closes
@@ -378,7 +396,7 @@ impl DiffMod {
                 }
                 Event::Selected { id, index } | Event::Activated { id, index } if id == FILES => self.pick_row(*index),
                 Event::Selected { id, index } | Event::Activated { id, index } if id == PICKER => {
-                    let hash = self.recent().get(*index).map(|c| c.0.clone());
+                    let hash = self.picker_entries().get(*index).map(|c| c.hash.clone());
                     self.picking = false;
                     if let Some(hash) = hash {
                         self.set_source(Source::Commit(hash));
@@ -403,6 +421,13 @@ impl DiffMod {
         // The commit list: the branch's last 40 commits, asked once it opens.
         if self.picking {
             self.need("recent", &["log", "-n40", "--format=%H%x00%cr%x00%s", "HEAD", "--"]);
+            // Opened: scrolled to the commit shown, once the list is read.
+            let entries = self.picker_entries();
+            if !self.picker_placed && !self.recent().is_empty() {
+                let at = entries.iter().position(|e| e.shown).unwrap_or(0);
+                self.picker_rows.scroll_to(at.saturating_sub(3) as u64);
+                self.picker_placed = true;
+            }
         }
         // All files: the file whose rows are at the top is the selected one.
         let scrolled = input.events.iter().any(|e| matches!(e, Event::VisibleRange { id, .. } if id == LINES));
@@ -560,6 +585,28 @@ impl DiffMod {
         let Ok(out) = answer(r) else { return Vec::new() };
         let fields: Vec<&str> = out.split(['\0', '\n']).collect();
         fields.as_chunks::<3>().0.iter().filter(|f| is_commit_id(f[0].trim())).map(|f| (f[0].trim().to_owned(), f[1].to_owned(), f[2].to_owned())).collect()
+    }
+
+    /// The commit list's rows: the branch's recent commits (HEAD's first), and the commit
+    /// shown on top when it isn't one of them (opened from the git graph on an older one,
+    /// or another branch's).
+    pub(crate) fn picker_entries(&self) -> Vec<PickerEntry> {
+        let shown = match &self.source {
+            Some(Source::Commit(h)) => Some(h.as_str()),
+            _ => None,
+        };
+        let is_shown = |hash: &str| shown.is_some_and(|h| hash.starts_with(h) || h.starts_with(hash));
+        let mut out: Vec<PickerEntry> = (self.recent().into_iter().enumerate())
+            .map(|(i, (hash, when, subject))| PickerEntry { shown: is_shown(&hash), head: i == 0, hash, when, subject })
+            .collect();
+        if let Some(h) = shown
+            && !out.is_empty()
+            && !out.iter().any(|e| e.shown)
+        {
+            let subject = self.repo.commit.as_ref().map(|c| c.subject.clone()).unwrap_or_default();
+            out.insert(0, PickerEntry { hash: h.to_owned(), when: String::new(), subject, shown: true, head: false });
+        }
+        out
     }
 
     /// Digits of the widest line number in the diffs shown (at least three).

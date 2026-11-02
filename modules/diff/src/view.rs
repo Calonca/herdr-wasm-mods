@@ -177,28 +177,42 @@ impl DiffMod {
     /// selection (the rows keep their colours), each row the hash, the subject cut
     /// with … before the time.
     fn picker(&self, input: &Input, p: &Palette) -> Node {
-        let recent = self.recent();
-        let current = match &self.source {
-            Some(Source::Commit(h)) => recent.iter().position(|c| c.0.starts_with(h.as_str()) || h.starts_with(c.0.as_str())),
-            _ => None,
-        };
-        let body = if recent.is_empty() {
+        let entries = self.picker_entries();
+        let current = entries.iter().position(|e| e.shown);
+        let body = if entries.is_empty() {
             muted("reading…")
         } else {
-            let items = recent
+            let accent = input.theme.accent;
+            let items = entries
                 .iter()
-                .map(|(hash, when, subject)| {
-                    let hash = code(vec![run(format!("{}  ", &hash[..7.min(hash.len())]), p.ansi[4])]).size(12.0);
-                    let subject = text(subject.clone()).size(12.5).color(Paint::Rgba(p.text)).truncate().width(Size::Fill);
-                    let when = text(format!("  {when}")).size(12.0).color(Paint::Rgba(p.muted));
-                    row_item("", row([hash, subject, when]).gap(0.0).wrap(false).width(Size::Fill))
+                .map(|e| {
+                    // The commit shown: a mark, its hash on the accent, its subject bold.
+                    let mark = text(if e.shown { "▶ " } else { "  " }).size(12.0).color(Paint::Rgba(accent)).wrap_mode(Wrap::Extend);
+                    let mut hash = run(&e.hash[..7.min(e.hash.len())], if e.shown { input.theme.space } else { p.ansi[4] });
+                    if e.shown {
+                        hash.bg = Some(accent);
+                    }
+                    let mut runs = vec![hash, run("  ", p.text)];
+                    if e.head {
+                        runs.push(run("HEAD  ", p.green()));
+                    }
+                    let hash = code(runs).size(12.0);
+                    let mut subject = text(e.subject.clone()).size(12.5).color(Paint::Rgba(p.text)).truncate().width(Size::Fill);
+                    if e.shown {
+                        subject = subject.bold();
+                    }
+                    let when = if e.shown { "  shown".to_owned() } else { format!("  {}", e.when) };
+                    let when = text(when).size(12.0).color(Paint::Rgba(if e.shown { accent } else { p.muted })).wrap_mode(Wrap::Extend);
+                    row_item("", row([mark, hash, subject, when]).gap(0.0).wrap(false).width(Size::Fill))
                 })
                 .collect();
             let room = if input.height > 0.0 { (input.height - 150.0).max(120.0) } else { PICKER_MAX };
-            let height = (recent.len() as f32 * 26.0 + 8.0).min(PICKER_MAX).min(room);
-            let total = recent.len() as u64;
+            let height = (entries.len() as f32 * 26.0 + 8.0).min(PICKER_MAX).min(room);
+            // As wide as the pane lets a popup be (they show in its middle).
+            let width = if input.width > 0.0 { (input.width * 0.9 - 32.0).max(320.0) } else { 560.0 };
+            let total = entries.len() as u64;
             let list = self.picker_rows.view(PICKER, items, total, 0).dense().list_style(ListStyle::Soft).selected(current);
-            list.width(Size::Fixed(560.0)).height(Size::Fixed(height))
+            list.width(Size::Fixed(width)).height(Size::Fixed(height))
         };
         popup(PICKER_POPUP, Anchor::Node { id: "commits".into(), side: Side::Below }, body)
     }
