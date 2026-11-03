@@ -12,10 +12,14 @@ is a git repo. **commit ▾** shows one of the branch's recent commits.
 **Permissions**, asked in its pane before it gets them:
 - know the folder and git branch of the tab it's in
 - read the git history and changes of that folder
+- read files in `~/.local/share/wasm-mods/diff`
+- change files in `~/.local/share/wasm-mods/diff`
 
 The host runs git for it in the tab's folder, reading commands only (`diff`,
-`status`, `log`, …): nothing is written, no other program runs, nothing reaches
-the network. Untracked files are listed but not shown. A new build asks again.
+`status`, `log`, …): nothing is written to the repo, no other program runs, nothing
+reaches the network. The view toggles (all files, side by side, wrap) are kept
+for the next diff in `~/.local/share/wasm-mods/diff/settings.json`; without the
+last two permissions each diff starts with them off. Untracked files are listed but not shown. A new build asks again.
 
 **Needs WASM Mods host 0.2.0:** the first time it's shown on a machine with
 no host that runs it, the pane offers to install the one pinned in

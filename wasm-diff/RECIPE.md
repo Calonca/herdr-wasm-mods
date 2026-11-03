@@ -3,7 +3,8 @@
 What changed in the tab's git repo, as a sandboxed WebAssembly mod in a Herdr
 pane: uncommitted changes, unpushed commits, the whole branch or one commit,
 as a file tree and a syntax-coloured diff. It reads the repo only through the
-host, which runs git's reading commands for it once you allowed it.
+host, which runs git's reading commands for it once you allowed it, and keeps
+its view toggles in `~/.local/share/wasm-mods/diff`.
 **commit ▾** picks one of the branch's recent commits. Needs WASM Mods host
 0.2.0: the first time
 it's shown on a machine without it, it offers to install it.
@@ -13,9 +14,11 @@ it's shown on a machine without it, it offers to install it.
 ## What you see
 
 - The first time: "wasm-diff asks to:", "what changed: uncommitted,
-  unpushed, the branch, a commit", two bullets ("know the folder and git
+  unpushed, the branch, a commit", four bullets ("know the folder and git
   branch of the tab it's in", "read the git history and changes of that
-  folder") with their ids (`window.folder`, `git`) in small `dim` text,
+  folder", "read files in ~/.local/share/wasm-mods/diff", "change files in
+  ~/.local/share/wasm-mods/diff") with their ids (`window.folder`, `git`,
+  `fs.read:…`, `fs.write:…`) in small `dim` text,
   **Allow** and **Deny**.
 - Then, in Herdr's theme:
   - a row of pills: **uncommitted**, **unpushed**, **branch**, **commit ▾**
@@ -68,11 +71,14 @@ it's shown on a machine without it, it offers to install it.
 - `diff.wasm`: the module, built from `modules/diff` with the `wasm-mods-sdk`
   crate for `wasm32-unknown-unknown`
   (`cargo build --release --target wasm32-unknown-unknown`). It's protocol 5.
-- `host.lock.json` pins host 0.2.0 (protocol 4 to 5), by URL and SHA-256 per
-  machine (`linux-x86_64`, `linux-aarch64`), and the module's own SHA-256 and
-  protocol.
+- `host.lock.json` pins host 0.2.2 (protocol 4 to 5), by URL and SHA-256 per
+  machine (`linux-x86_64`, `linux-aarch64`, `macos-aarch64`, `macos-x86_64`),
+  and the module's own SHA-256 and protocol.
 - The module: `manifest!(description: "what changed: uncommitted, unpushed,
-  the branch, a commit", capabilities: ["window.folder", "git"])`. It runs
+  the branch, a commit", capabilities: ["window.folder", "git",
+  "fs.read:~/.local/share/wasm-mods/diff",
+  "fs.write:~/.local/share/wasm-mods/diff"])`. The toggles (all files, side by
+  side, wrap) are kept in `settings.json` there, for the next diff opened. It runs
   `git status`, `rev-parse`, `merge-base`, `rev-list`, `for-each-ref`,
   `branch`, `ls-files`, `log` and `diff --numstat` / `diff` per file with
   `run_tool("git", id, args)`, at most 4 at once, and reads the answers in a
@@ -88,14 +94,15 @@ it's shown on a machine without it, it offers to install it.
 - The folder must stay self-contained: Herdr refuses imports from outside a
   mod's folder, so the bridge is a copy here, and the module and its lock sit
   beside it.
-- A file's diff is read when it's first shown (one `git diff` per file; all
-  files: every file's), so a big change set opens fast and fills in.
+- Every file's diff is read at once (one `git diff` per file) and coloured in
+  slices in the background (`Output::busy()`: the host calls again with no
+  events until it's done), so a big change set opens fast and fills in.
 
 ## Done when
 
 - `herdr-app check` passes for `wasm-diff`.
 - In a tab on a git repo with a changed file, `tab.new {"mod": "wasm-diff"}`
-  shows the prompt with `window.folder` and `git`. Allow: the file tree and
+  shows the prompt with `window.folder`, `git` and the two `fs` ones. Allow: the file tree and
   the first file's diff show, syntax-coloured.
 - PageDown scrolls the diff by a screen and the scrollbar follows; ⏎ on a
   folder folds it; a shows all files.
