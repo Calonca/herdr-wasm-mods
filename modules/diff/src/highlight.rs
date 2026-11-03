@@ -2,15 +2,16 @@
 //! Tokens are kinds, not colours: the view maps them to the theme, so a theme change
 //! needs no new parse.
 //!
-//! Only what's shown is parsed: each side of a hunk (its old lines, context and removed,
-//! or its new ones, context and added) in blocks of [`BLOCK`] lines, a block when a row
-//! of it is first shown, and kept. A block goes on from where the block before it ended
-//! when that one is parsed (scrolling down, it always is), else from a fresh start, as a
-//! hunk's first block does. A call parses at most [`BUDGET`] lines: a big hunk never
-//! takes long, whatever its size (a grammar parses a few thousand lines a second
-//! here). The tab's file isn't read for it (the diff's own lines are enough, on any
-//! machine and for uncommitted changes), so a hunk, or a block jumped to, that starts
-//! inside a block comment or a long string shows that part as code.
+//! Each side of a hunk (its old lines, context and removed, or its new ones, context and
+//! added) is parsed in blocks of [`BLOCK`] lines, and kept: the rows on screen and ahead
+//! of them first, then (in the background, a slice per call) every other hunk of the
+//! diff. A block goes on from where the block before it ended when that one is parsed
+//! (scrolling down, or in the background, it always is), else from a fresh start, as a
+//! hunk's first block does. Work is counted in bytes ([`cost`]): a call parses about as
+//! much as it's given, whatever the lines' length (a grammar parses a few hundred
+//! kilobytes a second here). The tab's file isn't read for it (the diff's own lines are
+//! enough, on any machine and for uncommitted changes), so a hunk, or a block jumped to,
+//! that starts inside a block comment or a long string shows that part as code.
 
 use std::sync::OnceLock;
 
@@ -20,9 +21,14 @@ use crate::git::{Hunk, LineKind};
 
 /// Lines longer than this aren't highlighted (minified files): plain.
 const MAX_LINE: usize = 2000;
-/// Lines parsed together, and the most parsed in one call.
+/// Lines parsed together.
 pub const BLOCK: usize = 48;
-pub const BUDGET: usize = 2 * BLOCK;
+
+/// What parsing a line costs, in the units budgets count: its bytes, and a little for
+/// the line itself.
+pub fn cost(text: &str) -> usize {
+    text.len().min(MAX_LINE) + 24
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Token {
@@ -74,8 +80,8 @@ impl HunkTokens {
         side.lines.get(i)?.as_ref()
     }
 
-    /// Parses the blocks holding lines `lines` not parsed yet, both sides, within
-    /// `budget` lines; returns the lines parsed.
+    /// Parses the blocks holding lines `lines` not parsed yet, both sides, until `budget`
+    /// is spent (a block started is finished); returns what was spent ([`cost`]).
     pub fn parse(&mut self, hunk: &Hunk, lines: std::ops::Range<usize>, budget: usize) -> usize {
         let Some(syntax) = self.syntax else { return 0 };
         let mut spent = 0;
@@ -97,13 +103,18 @@ impl HunkTokens {
                     let l = &hunk.lines[i];
                     if l.kind == LineKind::Context || l.kind == keep {
                         side.lines[i] = line(&mut state, &mut stack, &l.text);
-                        spent += 1;
+                        spent += cost(&l.text);
                     }
                 }
                 side.ends[block] = Some((state, stack));
             }
         }
         spent
+    }
+
+    /// Whether it's all parsed (or there's nothing to parse).
+    pub fn done(&self) -> bool {
+        self.syntax.is_none() || self.new.ends.iter().all(Option::is_some)
     }
 
     /// Whether every block holding lines `lines` is parsed (or there's nothing to parse).

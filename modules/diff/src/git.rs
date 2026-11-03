@@ -175,14 +175,69 @@ pub struct Hunk {
 pub struct FileDiff {
     pub hunks: Vec<Hunk>,
     pub binary: bool,
+    /// The widest line number, in digits (for the number columns), worked out once.
+    digits: usize,
 }
 
 impl FileDiff {
     /// The widest line number, in digits (for the number columns).
     pub fn digits(&self) -> usize {
-        let most = self.hunks.iter().flat_map(|h| &h.lines).flat_map(|l| [l.old, l.new]).flatten().max().unwrap_or(1);
-        most.to_string().len()
+        self.digits.max(1)
     }
+}
+
+/// The whole range's `git diff` (every file's, one after another) cut into each file's
+/// part, with the path it's under (the new one for a rename or a copy), as git printed
+/// it. A path git quoted (unusual characters) is `None`: that file is read on its own.
+/// `cut`: the output was cut short, so its last file's part is dropped.
+pub fn split_diff(out: &str, cut: bool) -> Vec<(Option<String>, &str)> {
+    let mut starts: Vec<usize> = Vec::new();
+    let mut at = 0;
+    for line in out.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            starts.push(at);
+        }
+        at += line.len();
+    }
+    let mut parts: Vec<(Option<String>, &str)> = (0..starts.len())
+        .map(|k| {
+            let text = &out[starts[k]..starts.get(k + 1).copied().unwrap_or(out.len())];
+            (part_path(text), text)
+        })
+        .collect();
+    if cut {
+        parts.pop();
+    }
+    parts
+}
+
+/// The path of one file's part of a diff, from its header (before the first hunk).
+fn part_path(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    let first = lines.next()?;
+    let (mut to, mut from, mut minus) = (None, None, None);
+    for line in lines.take_while(|l| !l.starts_with("@@ ")) {
+        if let Some(p) = line.strip_prefix("rename to ").or_else(|| line.strip_prefix("copy to ")) {
+            to = Some(p);
+        } else if let Some(p) = line.strip_prefix("+++ ") {
+            from = Some(p);
+        } else if let Some(p) = line.strip_prefix("--- ") {
+            minus = Some(p);
+        }
+    }
+    let path = match (to, from, minus) {
+        (Some(p), _, _) => p,
+        (None, Some(p), _) if p != "/dev/null" => p.strip_prefix("b/")?,
+        (None, _, Some(p)) if p != "/dev/null" => p.strip_prefix("a/")?,
+        // No `---`/`+++` (a mode change, a binary file): `diff --git a/P b/P`.
+        _ => {
+            let both = first.strip_prefix("diff --git a/")?;
+            let half = both.len().checked_sub(3)? / 2;
+            let (a, b) = (both.get(..half)?, both.get(half..)?);
+            (b.strip_prefix(" b/")? == a).then_some(a)?
+        }
+    };
+    (!path.starts_with('"')).then(|| path.to_owned())
 }
 
 /// One file's `git diff -U3` output.
@@ -218,6 +273,8 @@ pub fn parse_diff(out: &str) -> FileDiff {
             hunk.lines.push(DiffLine { kind, old: o, new: n, text: text.replace('\t', "    ") });
         }
     }
+    let most = diff.hunks.iter().flat_map(|h| &h.lines).flat_map(|l| [l.old, l.new]).flatten().max().unwrap_or(1);
+    diff.digits = most.to_string().len();
     diff
 }
 

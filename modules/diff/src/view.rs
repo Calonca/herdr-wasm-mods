@@ -6,7 +6,7 @@
 //! ends with a quiet rule, the all-files view with a doubled one. Both lists have virtual
 //! rows: only the rows in view (and a margin) are built.
 
-use crate::git::{DiffLine, FileDiff, FileEntry, LineKind, Source, is_commit_id};
+use crate::git::{DiffLine, FileDiff, FileEntry, LineKind, Source, is_commit_id, short};
 use crate::highlight::{Token, Tokens};
 use crate::rows::{Cell, Row, wrap};
 use crate::{DiffMod, FILES, LINES, PICKER, PICKER_POPUP, Stage, tree};
@@ -23,7 +23,9 @@ const NARROW: f32 = 640.0;
 /// Below this width the header's toggles go on a second row.
 const TWO_ROWS: f32 = 820.0;
 /// A character of the code font, in points (for the wrapping width).
-const CHAR: f32 = CODE_SIZE * 0.6;
+pub(crate) const CHAR: f32 = CODE_SIZE * 0.6;
+/// The farthest the code scrolls sideways, in characters.
+pub(crate) const PAN_MAX: usize = 4000;
 
 /// The colours the diff uses, from the theme.
 struct Palette {
@@ -144,6 +146,16 @@ impl DiffMod {
         };
         let label = commit.as_deref().map_or("commit ▾".to_owned(), |h| format!("{} ▾", Source::Commit(h.to_owned()).name()));
         pills.push(toggle("commits", label, matches!(self.source, Some(Source::Commit(_)))));
+        // Opened from the git graph: the commit before and after, in its order (greyed
+        // out at either end).
+        if let Some((older, newer)) = self.steps() {
+            let step = |id: &str, label: &str, to: Option<&str>| match to {
+                Some(to) => ghost(id, label).tooltip(text(format!("commit {}", short(to)))),
+                None => row([text(label).wrap_mode(Wrap::Extend)]).variant(Variant::Button(ButtonKind::Ghost)).opacity(0.4).wrap(false),
+            };
+            pills.push(step("step/older", "← older", older));
+            pills.push(step("step/newer", "newer →", newer));
+        }
         let toggles = vec![
             toggle("all-files", "all files", self.all_files),
             toggle("side-by-side", "side by side", self.side_by_side),
@@ -165,28 +177,42 @@ impl DiffMod {
     /// selection (the rows keep their colours), each row the hash, the subject cut
     /// with … before the time.
     fn picker(&self, input: &Input, p: &Palette) -> Node {
-        let recent = self.recent();
-        let current = match &self.source {
-            Some(Source::Commit(h)) => recent.iter().position(|c| c.0.starts_with(h.as_str()) || h.starts_with(c.0.as_str())),
-            _ => None,
-        };
-        let body = if recent.is_empty() {
+        let entries = self.picker_entries();
+        let current = entries.iter().position(|e| e.shown);
+        let body = if entries.is_empty() {
             muted("reading…")
         } else {
-            let items = recent
+            let accent = input.theme.accent;
+            let items = entries
                 .iter()
-                .map(|(hash, when, subject)| {
-                    let hash = code(vec![run(format!("{}  ", &hash[..7.min(hash.len())]), p.ansi[4])]).size(12.0);
-                    let subject = text(subject.clone()).size(12.5).color(Paint::Rgba(p.text)).truncate().width(Size::Fill);
-                    let when = text(format!("  {when}")).size(12.0).color(Paint::Rgba(p.muted));
-                    row_item("", row([hash, subject, when]).gap(0.0).wrap(false).width(Size::Fill))
+                .map(|e| {
+                    // The commit shown: a mark, its hash on the accent, its subject bold.
+                    let mark = text(if e.shown { "▶ " } else { "  " }).size(12.0).color(Paint::Rgba(accent)).wrap_mode(Wrap::Extend);
+                    let mut hash = run(&e.hash[..7.min(e.hash.len())], if e.shown { input.theme.space } else { p.ansi[4] });
+                    if e.shown {
+                        hash.bg = Some(accent);
+                    }
+                    let mut runs = vec![hash, run("  ", p.text)];
+                    if e.head {
+                        runs.push(run("HEAD  ", p.green()));
+                    }
+                    let hash = code(runs).size(12.0);
+                    let mut subject = text(e.subject.clone()).size(12.5).color(Paint::Rgba(p.text)).truncate().width(Size::Fill);
+                    if e.shown {
+                        subject = subject.bold();
+                    }
+                    let when = if e.shown { "  shown".to_owned() } else { format!("  {}", e.when) };
+                    let when = text(when).size(12.0).color(Paint::Rgba(if e.shown { accent } else { p.muted })).wrap_mode(Wrap::Extend);
+                    row_item("", row([mark, hash, subject, when]).gap(0.0).wrap(false).width(Size::Fill))
                 })
                 .collect();
             let room = if input.height > 0.0 { (input.height - 150.0).max(120.0) } else { PICKER_MAX };
-            let height = (recent.len() as f32 * 26.0 + 8.0).min(PICKER_MAX).min(room);
-            let total = recent.len() as u64;
+            let height = (entries.len() as f32 * 26.0 + 8.0).min(PICKER_MAX).min(room);
+            // As wide as the pane lets a popup be (they show in its middle).
+            let width = if input.width > 0.0 { (input.width * 0.9 - 32.0).max(320.0) } else { 560.0 };
+            let total = entries.len() as u64;
             let list = self.picker_rows.view(PICKER, items, total, 0).dense().list_style(ListStyle::Soft).selected(current);
-            list.width(Size::Fixed(560.0)).height(Size::Fixed(height))
+            list.width(Size::Fixed(width)).height(Size::Fixed(height))
         };
         popup(PICKER_POPUP, Anchor::Node { id: "commits".into(), side: Side::Below }, body)
     }
@@ -291,8 +317,8 @@ impl DiffMod {
             };
             return column([bar, muted(note)]).gap(6.0).width(Size::Fill);
         }
-        let range = self.line_rows.range(total, MARGIN);
-        self.highlight(range.start as usize..range.end as usize);
+        let range = self.line_range(total);
+        self.colour_sent(range.start as usize..range.end as usize);
         let digits = self.digits();
         let (pan, wrapping) = (if self.wrap { 0 } else { self.pan }, self.cols);
         let _ = self.rows();
@@ -447,11 +473,12 @@ impl Draw<'_> {
         let mut out: Vec<Span> = Vec::new();
         for w in cuts.windows(2) {
             let (a, b) = (w[0], w[1]);
-            let mut span = run(&t[a..b], color_at(a));
-            if change.is_some_and(|(x, y)| x <= a && b <= y) {
-                span.bg = Some(with_alpha(mark, 0x47));
+            let (color, bg) = (color_at(a), change.is_some_and(|(x, y)| x <= a && b <= y).then(|| with_alpha(mark, 0x47)));
+            // Next to a run of the same look: one run (fewer to send and draw).
+            match out.last_mut() {
+                Some(last) if last.color == Some(color) && last.bg == bg => last.text.push_str(&t[a..b]),
+                _ => out.push(Span { bg, ..run(&t[a..b], color) }),
             }
-            out.push(span);
         }
         out
     }

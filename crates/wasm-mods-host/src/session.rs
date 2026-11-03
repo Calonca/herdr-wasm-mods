@@ -28,6 +28,9 @@ const HELLO_WITHIN: Duration = Duration::from_secs(5);
 const TICK: Duration = Duration::from_secs(1);
 /// How often watched files are looked at.
 const POLL: Duration = Duration::from_millis(250);
+/// While the module has work going on in the background ([`Wants::busy`]): the pause
+/// between its calls when nothing else happens.
+const BUSY_POLL: Duration = Duration::from_millis(8);
 /// The most calls in a row one event may cause (a call answering file requests causes
 /// the next).
 const CHAIN_MAX: usize = 8;
@@ -61,7 +64,12 @@ pub fn serve(stream: TcpStream, config: &Config) {
         return;
     }
     let _ = s.stream.set_read_timeout(Some(POLL));
+    let mut busy = false;
     loop {
+        if s.busy != busy {
+            busy = s.busy;
+            let _ = s.stream.set_read_timeout(Some(if busy { BUSY_POLL } else { POLL }));
+        }
         match reader.fill_buf() {
             Ok([]) => return,
             Ok(_) => {}
@@ -178,6 +186,11 @@ struct Session<'a> {
     under: Option<Box<Under>>,
     switch: Option<Switch>,
     closed: bool,
+    /// The module's last answer said it has work going on ([`Wants::busy`]): it's
+    /// called again on the next quiet tick.
+    busy: bool,
+    /// This call is one of those: a frame that didn't change isn't sent.
+    background: bool,
 }
 
 impl<'a> Session<'a> {
@@ -215,6 +228,8 @@ impl<'a> Session<'a> {
             under: None,
             switch: None,
             closed: false,
+            busy: false,
+            background: false,
         }
     }
 
@@ -341,6 +356,12 @@ impl<'a> Session<'a> {
                 self.render(Vec::new());
             }
         }
+        // Work in the background: the module's next slice of it.
+        if self.busy {
+            self.background = true;
+            self.render(Vec::new());
+            self.background = false;
+        }
         if self.last_tick.elapsed() < TICK {
             return;
         }
@@ -454,6 +475,7 @@ impl<'a> Session<'a> {
                 self.again = true;
             }
             self.wants_window = out.wants.window;
+            self.busy = out.wants.busy;
             self.effects(&out, gesture);
             // Another module in this window (or back to the one under): it's called
             // instead, and this answer isn't shown.
@@ -484,9 +506,14 @@ impl<'a> Session<'a> {
                 }
                 images.extend(drawn);
             }
-            self.shown = Some((out.title, ui, out.actions, images));
+            let frame = (out.title, ui, out.actions, images);
+            // A call of its own (work in the background) that changed nothing shown.
+            let same = self.background && self.shown.as_ref() == Some(&frame);
+            self.shown = Some(frame);
             self.call_ms = t.elapsed().as_secs_f64() * 1e3;
-            self.resend();
+            if !same {
+                self.resend();
+            }
             if self.fs.is_empty() && self.images.events.is_empty() && !std::mem::take(&mut self.again) {
                 return;
             }
@@ -524,6 +551,7 @@ impl<'a> Session<'a> {
             tool_runs: std::mem::take(&mut self.tool_runs),
         }));
         self.shown = None;
+        self.busy = false;
         self.ready();
     }
 
@@ -537,6 +565,7 @@ impl<'a> Session<'a> {
         self.tools = u.tools;
         self.tool_runs = u.tool_runs;
         self.shown = None;
+        self.busy = false;
         self.ready();
     }
 
@@ -667,6 +696,7 @@ impl<'a> Session<'a> {
         if let Some(m) = &mut self.module {
             m.stopped = true;
         }
+        self.busy = false;
         let message = format!("{name} stopped: {why}. A new build of it starts it again.");
         self.send(&Out::Error { message: &message });
     }

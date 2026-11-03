@@ -54,6 +54,13 @@ impl Output {
         self
     }
 
+    /// Asks to be called again soon, with no events: work goes on in the background
+    /// ([`Wants::busy`]).
+    pub fn busy(mut self) -> Self {
+        self.wants.busy = true;
+        self
+    }
+
     /// Appends `data` to [`Output::bytes`] and returns where it went.
     pub fn add_bytes(&mut self, data: &[u8]) -> Blob {
         let start = self.bytes.len() as u32;
@@ -81,6 +88,13 @@ pub struct Wants {
     /// [`Input::window`] (capability `window.folder`).
     #[serde(default)]
     pub window: bool,
+    /// The module has work left to do in the background (colouring a big diff ahead of
+    /// the user): the host calls it again shortly, with no events, while nothing else
+    /// happens, until an answer says it's done. Each call stays well under the call's
+    /// time limit: do a slice of the work per call. A frame equal to the last one shown
+    /// isn't sent again. A host that doesn't know this field calls only on events.
+    #[serde(default)]
+    pub busy: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

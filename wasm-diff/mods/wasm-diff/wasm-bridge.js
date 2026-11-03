@@ -1094,7 +1094,23 @@ export class WasmView extends View {
   /** An answer covers every event sent up to its ack. */
   acked(ack) {
     for (const seq of this.sent.keys()) if (seq <= ack) this.sent.delete(seq);
+    if (!this.sent.size && this.wheels?.size) this.sendWheels();
     if (!this.sent.size && this.held?.size) this.sendEvents([]);
+  }
+
+  /** A sideways wheel over a list (`dx` points): summed while the module hasn't answered
+   *  yet, then sent as one. */
+  wheel(id, dx, m) {
+    this.wheels ??= new Map();
+    this.wheels.set(id, (this.wheels.get(id) ?? 0) + dx);
+    this.wheelMods = m;
+    if (!this.sent.size) this.sendWheels();
+  }
+
+  sendWheels() {
+    const events = [...this.wheels].filter(([, dx]) => dx).map(([id, dx]) => ({ Wheel: { id, dx, dy: 0, x: 0, y: 0 } }));
+    this.wheels.clear();
+    this.sendEvents(events, this.wheelMods);
   }
 
   /** Text fields and lists in the new tree: states for new fields (made here, in a
@@ -1569,7 +1585,12 @@ export class WasmView extends View {
     if (w.scroll_to && w.scroll_to.revision !== state.revision) {
       state.revision = w.scroll_to.revision;
       const row = Math.min(Number(w.scroll_to.row), Math.max(0, total - 1));
-      state.handle.scroll_to_item(row, "top");
+      // The row goes on top. The handle brings an item to the *near* edge: below the
+      // rows showing that's the bottom one, so it's asked for the row a screenful past
+      // it (less one, for a row cut at the bottom edge).
+      const [at, shown] = (state.sent || "0:0").split(":").map(Number);
+      const to = row > at && shown > 2 ? Math.min(total - 1, row + shown - 2) : row;
+      state.handle.scroll_to_item(to, "top");
     }
     // One height for every row: the list places rows by it, in the script's pixels (the
     // app zooms a list's item sizes, as it does the row). Code (dense, monospace: a
@@ -1610,6 +1631,16 @@ export class WasmView extends View {
     let box = div().relative().w_full().child(el)
       // The module's page always shows where it is; other lists' bars show when they move.
       .child(Scrollbar.vertical(`list-${v.id}`).absolute().inset_0().when(Boolean(v.pages), (b) => b.mode("always")));
+    // The module's page scrolls sideways itself (a diff's long lines): a sideways wheel or
+    // touchpad scroll, or Shift with the wheel, goes to the module as a Wheel.
+    if (v.pages) box = box.on_scroll_wheel((e, cx) => {
+      const m = e.modifiers ?? {}, d = e.delta ?? {};
+      const x = Number(d.x) || 0, y = Number(d.y) || 0;
+      const dx = m.shift && !x ? y : Math.abs(x) > Math.abs(y) ? x : 0;
+      if (!dx) return;
+      this.wheel(v.id, dx, m);
+      cx.stop_propagation();
+    });
     if (v.font === "Mono" && settings()?.font_family) box = box.font_family(String(settings().font_family));
     const h = v.layout?.height;
     box = h?.Fixed !== undefined ? box.h(h.Fixed) : ctx.inRow ? box.h_full() : box.flex_1().min_h(0);

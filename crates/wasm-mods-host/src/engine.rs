@@ -477,7 +477,8 @@ mod tests {
 /// Replays a module's recorded inputs through the engine, with its frame limits:
 /// `REPLAY_WASM=<module.wasm> REPLAY_INPUTS=<dir of input-*.json> cargo test --release
 /// -p wasm-mods-host replay -- --ignored --nocapture` (the diff module's bench writes
-/// them: DIFF_BENCH_DUMP). Prints each call's time, and the error if one stops it.
+/// them: DIFF_BENCH_DUMP). Prints the calls of 20 ms or more (`REPLAY_EVERY=1`: every
+/// call), the times' spread, and the error if one stops it.
 #[cfg(test)]
 mod replay {
     #[test]
@@ -489,18 +490,22 @@ mod replay {
         let mut inputs: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).collect();
         inputs.sort();
         let mut worst = 0.0f64;
+        let mut times = Vec::new();
+        // REPLAY_EVERY=1: every call's time, not only the slow ones'.
+        let every = std::env::var("REPLAY_EVERY").is_ok();
         for path in inputs {
             let json = std::fs::read(&path).unwrap();
             let t = std::time::Instant::now();
             let r = instance.call(&json, &[]);
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             worst = worst.max(ms);
+            times.push(ms);
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             if let (Ok((out, _)), Ok(dir)) = (&r, std::env::var("REPLAY_OUT")) {
                 let _ = std::fs::write(format!("{dir}/{name}"), out);
             }
             match r {
-                Ok(_) if ms >= 20.0 => println!("REPLAY {name} {ms:.1} ms"),
+                Ok(_) if ms >= 20.0 || every => println!("REPLAY {name} {ms:.1} ms"),
                 Ok(_) => {}
                 Err(e) => {
                     println!("REPLAY {name} {ms:.1} ms STOPPED: {e}");
@@ -508,6 +513,9 @@ mod replay {
                 }
             }
         }
+        times.sort_by(f64::total_cmp);
+        let p = |q: f64| times.get(((times.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or(0.0);
+        println!("REPLAY calls {} p50 {:.1} p90 {:.1} p99 {:.1} ms", times.len(), p(0.5), p(0.9), p(0.99));
         println!("REPLAY worst {worst:.1} ms");
     }
 }

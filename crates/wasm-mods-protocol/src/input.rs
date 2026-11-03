@@ -217,7 +217,9 @@ pub enum Event {
     /// The wheel or a two-finger touchpad scroll over a canvas with
     /// [`CanvasSense::wheel`] (and no `view`, which uses it to pan): `dx`, `dy` in points
     /// (positive: content moves right / down, as a scroll), at `(x, y)` in canvas
-    /// coordinates.
+    /// coordinates. Over the module's page (a [`Node::List`] with `pages`), a sideways
+    /// scroll (or Shift with the wheel): `dx` only, `x` and `y` 0; the list scrolls up
+    /// and down itself, and sideways is the module's (a diff's long lines).
     Wheel { id: String, dx: f32, dy: f32, x: f32, y: f32 },
     /// Ctrl+wheel or a pinch over a canvas with [`CanvasSense::wheel`] (and no `view`):
     /// zoom by `factor` (above 1: in) around `(x, y)`.

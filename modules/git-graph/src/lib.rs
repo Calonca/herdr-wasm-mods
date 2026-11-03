@@ -11,6 +11,10 @@
 //! commit made while nothing happens in the window shows on the next click, key or
 //! "refresh". 500 commits come at first; scrolling near the end reads 500 more.
 //!
+//! Whether the details show is kept in `~/.local/share/wasm-mods/git-graph/settings.json`
+//! (capabilities `fs.read`/`fs.write` on that folder) for the next graph opened. The diff
+//! it opens keeps its own toggles the same way.
+//!
 //! Build:   cargo build --release --target wasm32-unknown-unknown   (in modules/)
 //! Install: ../scripts/install.sh git-graph
 
@@ -38,6 +42,28 @@ const FIRST_ROWS: u64 = 50;
 const MORE_WITHIN: u64 = 50;
 /// Commit details kept, most recent first.
 const DETAILS_KEPT: usize = 32;
+/// Where the settings are kept.
+const SETTINGS_DIR: &str = "~/.local/share/wasm-mods/git-graph";
+const SETTINGS_FILE: &str = "~/.local/share/wasm-mods/git-graph/settings.json";
+
+/// The settings, as kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Settings {
+    details: bool,
+}
+
+/// Where the kept settings are at.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Kept {
+    /// Not asked for yet: the next call does.
+    #[default]
+    Unread,
+    Reading,
+    /// Read (or none kept yet), or last written: a change is written. (A write that
+    /// fails, the folder not allowed, isn't tried again until the next change.)
+    Read(Settings),
+}
 
 /// The module's state. Only the selection and the list's scroll survive a reload of a
 /// new build; the history is read again.
@@ -57,11 +83,17 @@ pub struct GitGraph {
     /// git runs asked for so far, for their ids.
     #[serde(skip)]
     runs: u64,
+    /// The kept settings, and whether the user changed one before they were read
+    /// (theirs win).
+    #[serde(skip)]
+    kept: Kept,
+    #[serde(skip)]
+    changed: bool,
 }
 
 impl Default for GitGraph {
     fn default() -> Self {
-        GitGraph { selected: None, rows: first_rows(), details: false, repo: Repo::default(), runs: 0 }
+        GitGraph { selected: None, rows: first_rows(), details: false, repo: Repo::default(), runs: 0, kept: Kept::Unread, changed: false }
     }
 }
 
@@ -133,6 +165,40 @@ fn head_row(commits: &[Commit]) -> Option<usize> {
 }
 
 impl GitGraph {
+    /// Takes in the kept settings, once read: they're the graph's, unless the user
+    /// changed one meanwhile.
+    fn take_settings(&mut self, input: &Input) {
+        let Some(reply) = input.fs_result("settings") else { return };
+        let read = match reply {
+            FsReply::Bytes { data, .. } => serde_json::from_slice::<Settings>(input.blob(*data)).ok(),
+            _ => None,
+        };
+        if let Some(kept) = read
+            && !self.changed
+        {
+            self.details = kept.details;
+        }
+        self.kept = Kept::Read(read.unwrap_or(Settings { details: self.details }));
+    }
+
+    /// Asks for the kept settings the first time; writes them when they change.
+    fn keep_settings(&mut self, out: &mut Output) {
+        let now = Settings { details: self.details };
+        match self.kept {
+            Kept::Unread => {
+                out.effects.push(fs::read_file("settings", SETTINGS_FILE));
+                self.kept = Kept::Reading;
+            }
+            Kept::Read(kept) if kept != now => {
+                let json = serde_json::to_vec(&now).unwrap_or_default();
+                out.effects.push(fs::create_dir("settings-dir", SETTINGS_DIR));
+                fs::write(out, "settings-save", SETTINGS_FILE, &json);
+                self.kept = Kept::Read(now);
+            }
+            _ => {}
+        }
+    }
+
     fn selected_row(&self) -> Option<usize> {
         let hash = self.selected.as_ref()?;
         self.repo.commits.iter().position(|c| c.hash == *hash)
@@ -296,9 +362,12 @@ impl GitGraph {
 
 impl Frame for GitGraph {
     fn update(&mut self, input: &Input) -> Output {
+        self.take_settings(input);
         let Some(window) = &input.window else {
             let ui = column([heading("git graph"), muted("waiting for the folder: allow this tab's folder to see its history")]);
-            return Output::new("git graph", ui).wants_window();
+            let mut out = Output::new("git graph", ui).wants_window();
+            self.keep_settings(&mut out);
+            return out;
         };
         if self.repo.folder != window.folder {
             self.repo = Repo::new(&window.folder);
@@ -306,7 +375,10 @@ impl Frame for GitGraph {
         self.answers(input);
         let mut effects = Vec::new();
         // Only in answer to the user's click or key: the host refuses it otherwise.
-        if self.events(input)
+        let details = self.details;
+        let diff = self.events(input);
+        self.changed |= self.details != details;
+        if diff
             && let Some(hash) = self.selected.clone()
         {
             effects.push(Effect::OpenDiff { commit: hash });
@@ -315,6 +387,7 @@ impl Frame for GitGraph {
         self.ask(input.time, &mut effects);
         let mut out = Output::new("git graph", self.view(input)).wants_window();
         out.effects = effects;
+        self.keep_settings(&mut out);
         if self.details {
             out = out.action(Action::Back, "close details");
         }
@@ -331,7 +404,7 @@ impl Frame for GitGraph {
 export_frame!(GitGraph);
 manifest!(
     description: "the repo's history as a commit graph: branches, tags, each commit's files; opens a commit's diff",
-    capabilities: ["window.folder", "git"]
+    capabilities: ["window.folder", "git", "fs.read:~/.local/share/wasm-mods/git-graph", "fs.write:~/.local/share/wasm-mods/git-graph"]
 );
 
 #[cfg(test)]

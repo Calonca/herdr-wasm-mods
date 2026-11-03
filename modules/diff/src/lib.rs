@@ -6,12 +6,22 @@
 //! side by side (s), syntax-coloured, with the changed words marked; long lines scroll
 //! sideways (←/→) or wrap (w). Tab goes to the next file (Shift+Tab back), Enter
 //! (or "refresh") reads it all again; while the window has focus it also looks again
-//! every few seconds. "commit ▾" picks one of the branch's recent commits.
+//! every few seconds. "commit ▾" picks one of the branch's recent commits. Opened from
+//! the git graph on a commit, "← older" and "newer →" (or ←/→; Shift+←/→ then scroll
+//! sideways) go to the commit before or after it in the graph's order, on the same file
+//! when that commit changed it too.
+//!
+//! The view toggles (all files, side by side, wrap) are kept in
+//! `~/.local/share/wasm-mods/diff/settings.json` (capabilities `fs.read`/`fs.write` on
+//! that folder), for every diff opened after: this one in its own tab, or the git
+//! graph's. Without them, each diff starts with the toggles off.
 //!
 //! Everything comes from git, run by the host in the tab's folder (capability `git`,
 //! reading commands only): the mod asks with `run_tool("git", …)` and reads the answers
-//! in a later call. Untracked files are listed but not shown: their content is outside
-//! git, and the commands that would read it (`diff --no-index`) aren't allowed.
+//! in a later call. Every file's diff is read at once, and coloured in the background
+//! (the rows on screen first), so scrolling finds its rows ready. Untracked files are
+//! listed but not shown: their content is outside git, and the commands that would read
+//! it (`diff --no-index`) aren't allowed.
 //!
 //! Build:   cargo build --release --target wasm32-unknown-unknown   (in modules/)
 //! Install: ../scripts/install.sh diff
@@ -45,8 +55,56 @@ const PAN: usize = 8;
 const TOGGLES: [(&str, &str, &str); 3] = [("all-files", "a", "all files"), ("side-by-side", "s", "side by side"), ("wrap", "w", "wrap")];
 /// git runs the host lets a module have going at once.
 const RUNS_MAX: usize = 4;
-/// All files: diffs are read for the rows on screen and this many rows either side.
-const AHEAD_ROWS: usize = 60;
+/// All files: diffs are read for the rows on screen and this many rows either side (until
+/// the whole range's diff, read at once, is in).
+const AHEAD_ROWS: usize = 160;
+/// Rows sent beyond those showing: ahead, the way the user last scrolled, and behind. A
+/// scroll that lands within them shows its rows at once, without waiting for this
+/// module's next answer.
+pub(crate) const AHEAD: u64 = 100;
+pub(crate) const BEHIND: u64 = 30;
+/// Colouring work ([`highlight::cost`], about bytes) a call may do: the rows showing, the
+/// rest of the rows sent, and the rest of the diff in the background: in a call of its
+/// own ([`Wants::busy`]), or, with a host that makes none, a little in each call.
+const SHOWING_WORK: usize = 96_000;
+const SENT_WORK: usize = 2_000;
+const BACKGROUND_WORK: usize = 4_000;
+const EVENT_WORK: usize = 1_000;
+/// The most colouring kept for one range (about bytes of code): past it, only what's
+/// shown is coloured.
+const COLOURED_MAX: usize = 16 << 20;
+/// The whole range's diff is read at once when it changes at most this many lines; a
+/// bigger one is read a file at a time, as it's shown.
+const ALL_AT_ONCE_MAX: u32 = 200_000;
+/// Commits read for going from one to the next, in the git graph's order (every branch,
+/// newest first, children before parents).
+const ORDER_MAX: usize = 20_000;
+
+/// Where the view toggles are kept.
+const SETTINGS_DIR: &str = "~/.local/share/wasm-mods/diff";
+const SETTINGS_FILE: &str = "~/.local/share/wasm-mods/diff/settings.json";
+
+/// The view toggles, as kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Settings {
+    all_files: bool,
+    side_by_side: bool,
+    wrap: bool,
+}
+
+/// Where the kept toggles are at.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Kept {
+    /// Not asked for yet: the next call does.
+    #[default]
+    Unread,
+    Reading,
+    /// Read (or none kept yet), or last written: a change is written. (A write that
+    /// fails, the folder not allowed, isn't tried again until the next change.)
+    Read(Settings),
+}
+
 /// How often (seconds) it reads the changes again while the window has focus.
 const POLL_SECS: f64 = 4.0;
 
@@ -89,8 +147,32 @@ struct Repo {
     version: u64,
     /// The rows shown, and what they were built for.
     rows: Option<(RowKey, Vec<Row>)>,
-    /// Syntax tokens of the hunks shown so far, by `(path, hunk)`.
+    /// Syntax tokens of the hunks coloured so far, by `(path, hunk)`; the files done
+    /// (every hunk), and how much was coloured ([`highlight::cost`]).
     tokens: BTreeMap<(String, usize), highlight::HunkTokens>,
+    coloured_files: BTreeSet<String>,
+    coloured: usize,
+}
+
+impl Repo {
+    /// Drops the colouring done.
+    fn uncolour(&mut self) {
+        self.tokens.clear();
+        self.coloured_files.clear();
+        self.coloured = 0;
+    }
+}
+
+/// A row of the commit list ("commit ▾").
+pub(crate) struct PickerEntry {
+    pub hash: String,
+    /// How long ago, as git says it.
+    pub when: String,
+    pub subject: String,
+    /// The commit the diff shows.
+    pub shown: bool,
+    /// Where HEAD is.
+    pub head: bool,
 }
 
 /// What the rows depend on: all files, side by side, the file (one-file view), the
@@ -114,9 +196,12 @@ pub struct DiffMod {
     /// Folders folded in the file list, by path.
     #[serde(default)]
     folded: Vec<String>,
-    /// Characters the code is scrolled sideways (not wrapping).
+    /// Characters the code is scrolled sideways (not wrapping), and the part of one a
+    /// sideways wheel has moved it so far.
     #[serde(default)]
     pan: usize,
+    #[serde(skip)]
+    pan_part: f32,
     /// The wrapping width in characters of code, worked out from the window's width.
     #[serde(skip)]
     cols: Option<usize>,
@@ -138,6 +223,9 @@ pub struct DiffMod {
     line_rows: VirtualRows,
     #[serde(skip)]
     picker_rows: VirtualRows,
+    /// The commit list was scrolled to the commit shown since it opened.
+    #[serde(skip)]
+    picker_placed: bool,
     #[serde(skip)]
     polled: f64,
     #[serde(skip)]
@@ -154,14 +242,38 @@ pub struct DiffMod {
     /// Esc, opened over another module: go back to it (this call's answer says so).
     #[serde(skip)]
     back: bool,
+    /// The diff was last scrolled up: the rows sent beyond those showing are above them.
+    #[serde(skip)]
+    up: bool,
+    /// The host calls again while this module is busy ([`Wants::busy`]): calls answering
+    /// the user leave the background alone.
+    #[serde(skip)]
+    called_back: bool,
+    #[serde(skip)]
+    was_busy: bool,
+    /// The kept toggles, and whether the user changed one before they were read (theirs
+    /// win).
+    #[serde(skip)]
+    kept: Kept,
+    #[serde(skip)]
+    toggled: bool,
+    /// Opened from the git graph: its commits, in its order, once read (to go to the one
+    /// before or after the commit shown).
+    #[serde(skip)]
+    from_graph: bool,
+    #[serde(skip)]
+    order: Vec<String>,
 }
 
 impl Frame for DiffMod {
     fn update(&mut self, input: &Input) -> Output {
         self.take_answers(input);
+        self.take_settings(input);
         let Some(window) = &input.window else {
             let ui = column([heading("diff"), muted("waiting for the folder: allow this mod to see the tab's folder")]);
-            return Output::new("diff", ui).wants_window();
+            let mut out = Output::new("diff", ui).wants_window();
+            self.keep_settings(&mut out);
+            return out;
         };
         if self.source.is_none() {
             self.source = Some(match input.arg.as_deref() {
@@ -173,7 +285,9 @@ impl Frame for DiffMod {
             self.folder = Some(window.folder.clone());
             self.repo = Repo::default();
         }
+        self.from_graph = input.opened_from.as_deref().is_some_and(|f| f.trim_start_matches("wasm-").replace(['-', '_'], " ") == "git graph");
         self.handle(input);
+        self.read_order();
         if self.repo.stage == Stage::Idle {
             self.reload(true);
             self.polled = input.time;
@@ -187,7 +301,16 @@ impl Frame for DiffMod {
             None => "diff".to_owned(),
         };
         let mut out = Output::new(title, self.view(input)).wants_window();
+        // The rest of the diff coloured in the background, a slice per call.
+        let quiet = input.events.is_empty() && input.data.tool_runs.is_empty() && input.data.fs.is_empty();
+        self.called_back |= quiet && self.was_busy;
+        let work = if input.events.is_empty() { BACKGROUND_WORK } else if self.called_back { 0 } else { EVENT_WORK };
+        self.was_busy = self.repo.stage == Stage::Ready && self.background(work);
+        if self.was_busy {
+            out = out.busy();
+        }
         self.flush(&mut out);
+        self.keep_settings(&mut out);
         if std::mem::take(&mut self.back) {
             out.effects.push(Effect::Close);
         }
@@ -216,7 +339,10 @@ impl DiffMod {
 
     fn handle(&mut self, input: &Input) {
         self.file_rows.handle(&input.events, FILES);
-        self.line_rows.handle(&input.events, LINES);
+        let was = self.line_rows.first;
+        if self.line_rows.handle(&input.events, LINES) && self.line_rows.first != was {
+            self.up = self.line_rows.first < was;
+        }
         self.picker_rows.handle(&input.events, PICKER);
         // A double-click's second click comes with its Activated: it changes nothing more
         // (the first click opened or closed the folder).
@@ -226,15 +352,25 @@ impl DiffMod {
         let activated_rows: Vec<usize> = input.events.iter()
             .filter_map(|e| match e { Event::Activated { id, index } if id == FILES => Some(*index), _ => None })
             .collect();
+        let stepping = self.steps().is_some() && !input.mods.shift;
         for event in &input.events {
             match event {
+                Event::Clicked { id } if id == "step/older" => self.step(true),
+                Event::Clicked { id } if id == "step/newer" => self.step(false),
+                // From the git graph: ←/→ go to the commit before or after (Shift+←/→
+                // scroll sideways).
+                Event::Action(Action::Move(Move::Left)) if stepping => self.step(true),
+                Event::Action(Action::Move(Move::Right)) if stepping => self.step(false),
                 Event::Clicked { id } => match id.strip_prefix("source/") {
                     Some("uncommitted") => self.set_source(Source::Uncommitted),
                     Some("unpushed") => self.set_source(Source::Unpushed),
                     Some("branch") => self.set_source(Source::Branch),
                     Some(hash) if is_commit_id(hash) => self.set_source(Source::Commit(hash.to_owned())),
                     _ if id == "refresh" => self.reload(true),
-                    _ if id == "commits" => self.picking = !self.picking,
+                    _ if id == "commits" => {
+                        self.picking = !self.picking;
+                        self.picker_placed = false;
+                    }
                     _ => match id.strip_prefix("fold/") {
                         Some(path) => self.fold(path),
                         // A click on a folder's row in the file list: it opens or closes
@@ -260,7 +396,7 @@ impl DiffMod {
                 }
                 Event::Selected { id, index } | Event::Activated { id, index } if id == FILES => self.pick_row(*index),
                 Event::Selected { id, index } | Event::Activated { id, index } if id == PICKER => {
-                    let hash = self.recent().get(*index).map(|c| c.0.clone());
+                    let hash = self.picker_entries().get(*index).map(|c| c.hash.clone());
                     self.picking = false;
                     if let Some(hash) = hash {
                         self.set_source(Source::Commit(hash));
@@ -271,9 +407,12 @@ impl DiffMod {
                 Event::Action(Action::Open) => self.reload(true),
                 // Tab; Shift+Tab goes back.
                 Event::Action(Action::Secondary) => self.step_file(if input.mods.shift { -1 } else { 1 }),
-                Event::Action(Action::Move(Move::Right)) if !self.wrap => self.pan += PAN,
+                Event::Action(Action::Move(Move::Right)) if !self.wrap => self.pan = (self.pan + PAN).min(view::PAN_MAX),
                 Event::Action(Action::Move(Move::Left)) if !self.wrap => self.pan = self.pan.saturating_sub(PAN),
                 Event::Action(Action::Move(Move::Home)) => self.pan = 0,
+                // A sideways wheel or touchpad scroll over the diff (positive: the content
+                // moves right, as a scroll does).
+                Event::Wheel { id, dx, .. } if id == LINES && !self.wrap => self.wheel(*dx),
                 // Opened over another module (the git graph's Space): back to it.
                 Event::Action(Action::Back) if input.opened_from.is_some() => self.back = true,
                 _ => {}
@@ -282,6 +421,13 @@ impl DiffMod {
         // The commit list: the branch's last 40 commits, asked once it opens.
         if self.picking {
             self.need("recent", &["log", "-n40", "--format=%H%x00%cr%x00%s", "HEAD", "--"]);
+            // Opened: scrolled to the commit shown, once the list is read.
+            let entries = self.picker_entries();
+            if !self.picker_placed && !self.recent().is_empty() {
+                let at = entries.iter().position(|e| e.shown).unwrap_or(0);
+                self.picker_rows.scroll_to(at.saturating_sub(3) as u64);
+                self.picker_placed = true;
+            }
         }
         // All files: the file whose rows are at the top is the selected one.
         let scrolled = input.events.iter().any(|e| matches!(e, Event::VisibleRange { id, .. } if id == LINES));
@@ -297,6 +443,14 @@ impl DiffMod {
         }
     }
 
+    /// Scrolls the code sideways by a wheel's `dx` points, whole characters at a time.
+    fn wheel(&mut self, dx: f32) {
+        let chars = self.pan as f32 + self.pan_part - dx / view::CHAR;
+        let chars = chars.clamp(0.0, view::PAN_MAX as f32);
+        self.pan = chars.floor() as usize;
+        self.pan_part = chars - self.pan as f32;
+    }
+
     /// Scrolls the file list to the selected file if it's out of sight (rows at the
     /// edges of the range may be only partly showing).
     fn reveal_selected(&mut self) {
@@ -307,8 +461,85 @@ impl DiffMod {
         }
     }
 
+    /// Opened from the git graph on a commit: the commits before (older) and after
+    /// (newer) it in the graph's order, once read; `None` otherwise.
+    pub(crate) fn steps(&self) -> Option<(Option<&str>, Option<&str>)> {
+        let Some(Source::Commit(hash)) = &self.source else { return None };
+        if !self.from_graph {
+            return None;
+        }
+        let at = self.order.iter().position(|c| c.starts_with(hash.as_str()))?;
+        Some((self.order.get(at + 1).map(String::as_str), at.checked_sub(1).map(|i| self.order[i].as_str())))
+    }
+
+    /// Reads the git graph's order of commits, once (opened from it on a commit).
+    fn read_order(&mut self) {
+        if !self.from_graph || !self.order.is_empty() || !matches!(self.source, Some(Source::Commit(_))) {
+            return;
+        }
+        let n = format!("-n{ORDER_MAX}");
+        if self.need("order", &["log", "--all", "--topo-order", "--format=%H", &n, "--"]) {
+            let out = self.repo.got.get("order").and_then(|r| answer(r).ok()).unwrap_or_default();
+            self.order = out.lines().map(str::trim).filter(|h| is_commit_id(h)).map(str::to_owned).collect();
+        }
+    }
+
+    /// Goes to the commit before (`older`) or after the one shown, in the git graph's
+    /// order: the same file stays selected when that commit changed it too, and the view
+    /// toggles stay; it shows from its top and its left edge.
+    fn step(&mut self, older: bool) {
+        let Some((before, after)) = self.steps() else { return };
+        let Some(hash) = (if older { before } else { after }).map(str::to_owned) else { return };
+        let keep = self.selected.clone();
+        self.set_source(Source::Commit(hash));
+        self.selected = keep;
+        self.line_rows.scroll_to(0);
+        self.line_rows.first = 0;
+        self.pan = 0;
+    }
+
+    /// The view toggles as they are.
+    fn settings(&self) -> Settings {
+        Settings { all_files: self.all_files, side_by_side: self.side_by_side, wrap: self.wrap }
+    }
+
+    /// Takes in the kept toggles, once read: they're the view's, unless the user changed
+    /// one meanwhile.
+    fn take_settings(&mut self, input: &Input) {
+        if let Some(reply) = input.fs_result("settings") {
+            let read = match reply {
+                FsReply::Bytes { data, .. } => serde_json::from_slice::<Settings>(input.blob(*data)).ok(),
+                _ => None,
+            };
+            if let Some(kept) = read
+                && !self.toggled
+            {
+                (self.all_files, self.side_by_side, self.wrap) = (kept.all_files, kept.side_by_side, kept.wrap);
+            }
+            self.kept = Kept::Read(read.unwrap_or_else(|| self.settings()));
+        }
+    }
+
+    /// Asks for the kept toggles the first time; writes them when they change.
+    fn keep_settings(&mut self, out: &mut Output) {
+        match self.kept {
+            Kept::Unread => {
+                out.effects.push(fs::read_file("settings", SETTINGS_FILE));
+                self.kept = Kept::Reading;
+            }
+            Kept::Read(kept) if kept != self.settings() => {
+                let json = serde_json::to_vec(&self.settings()).unwrap_or_default();
+                out.effects.push(fs::create_dir("settings-dir", SETTINGS_DIR));
+                fs::write(out, "settings-save", SETTINGS_FILE, &json);
+                self.kept = Kept::Read(self.settings());
+            }
+            _ => {}
+        }
+    }
+
     /// A header toggle, by name (its pill's id, its key's action).
     fn toggle(&mut self, name: &str) {
+        self.toggled |= matches!(name, "side-by-side" | "wrap" | "all-files");
         match name {
             "side-by-side" => self.side_by_side = !self.side_by_side,
             "wrap" => {
@@ -354,6 +585,28 @@ impl DiffMod {
         let Ok(out) = answer(r) else { return Vec::new() };
         let fields: Vec<&str> = out.split(['\0', '\n']).collect();
         fields.as_chunks::<3>().0.iter().filter(|f| is_commit_id(f[0].trim())).map(|f| (f[0].trim().to_owned(), f[1].to_owned(), f[2].to_owned())).collect()
+    }
+
+    /// The commit list's rows: the branch's recent commits (HEAD's first), and the commit
+    /// shown on top when it isn't one of them (opened from the git graph on an older one,
+    /// or another branch's).
+    pub(crate) fn picker_entries(&self) -> Vec<PickerEntry> {
+        let shown = match &self.source {
+            Some(Source::Commit(h)) => Some(h.as_str()),
+            _ => None,
+        };
+        let is_shown = |hash: &str| shown.is_some_and(|h| hash.starts_with(h) || h.starts_with(hash));
+        let mut out: Vec<PickerEntry> = (self.recent().into_iter().enumerate())
+            .map(|(i, (hash, when, subject))| PickerEntry { shown: is_shown(&hash), head: i == 0, hash, when, subject })
+            .collect();
+        if let Some(h) = shown
+            && !out.is_empty()
+            && !out.iter().any(|e| e.shown)
+        {
+            let subject = self.repo.commit.as_ref().map(|c| c.subject.clone()).unwrap_or_default();
+            out.insert(0, PickerEntry { hash: h.to_owned(), when: String::new(), subject, shown: true, head: false });
+        }
+        out
     }
 
     /// Digits of the widest line number in the diffs shown (at least three).
@@ -480,9 +733,34 @@ impl DiffMod {
         out
     }
 
-    /// The syntax tokens of the lines of rows `range`, worked out for those not yet, at
-    /// most [`highlight::BUDGET`] lines a call (the rest stay plain until a later one).
-    fn highlight(&mut self, range: std::ops::Range<usize>) {
+    /// The rows to send: those showing, [`AHEAD`] more the way the user scrolls and
+    /// [`BEHIND`] the other way.
+    pub(crate) fn line_range(&self, total: u64) -> std::ops::Range<u64> {
+        let (before, after) = if self.up { (AHEAD, BEHIND) } else { (BEHIND, AHEAD) };
+        let rows = &self.line_rows;
+        let start = rows.first.saturating_sub(before).min(total);
+        let end = rows.first.saturating_add(rows.count).saturating_add(after).min(total);
+        start..end.max(start)
+    }
+
+    /// Colours the rows sent: those showing first (all of them, within a generous
+    /// budget), then the rest, a slice a call. The rest of the diff is the background's.
+    pub(crate) fn colour_sent(&mut self, sent: std::ops::Range<usize>) {
+        let showing = self.line_rows.first as usize..(self.line_rows.first + self.line_rows.count) as usize;
+        let showing = showing.start.max(sent.start)..showing.end.min(sent.end);
+        self.highlight(showing.clone(), SHOWING_WORK);
+        // Ahead first, then behind.
+        let (ahead, behind) = (showing.end.max(sent.start)..sent.end, sent.start..showing.start.min(sent.end));
+        let ahead = if self.up { [behind, ahead] } else { [ahead, behind] };
+        let mut budget = SENT_WORK;
+        for range in ahead {
+            budget = budget.saturating_sub(self.highlight(range, budget));
+        }
+    }
+
+    /// The syntax tokens of the lines of rows `range`, worked out for those not yet,
+    /// within `budget`; returns the work done.
+    fn highlight(&mut self, range: std::ops::Range<usize>, budget: usize) -> usize {
         // Each hunk's lines in these rows, in the order they show.
         let mut wanted: Vec<((usize, usize), std::ops::Range<usize>)> = Vec::new();
         for r in self.rows().get(range).unwrap_or_default() {
@@ -502,16 +780,58 @@ impl DiffMod {
             }
         }
         let repo = &mut self.repo;
-        let mut budget = highlight::BUDGET;
+        let mut spent = 0;
         for ((file, hunk), lines) in wanted {
+            if spent >= budget {
+                break;
+            }
             let path = &repo.files[file].path;
             let Some(Ok(diff)) = repo.diffs.get(path) else { continue };
             let Some(h) = diff.hunks.get(hunk) else { continue };
             let tokens = repo.tokens.entry((path.clone(), hunk)).or_insert_with(|| highlight::HunkTokens::new(path, h));
             if !tokens.has(lines.clone()) {
-                budget = budget.saturating_sub(tokens.parse(h, lines, budget));
+                spent += tokens.parse(h, lines, budget - spent);
             }
         }
+        repo.coloured += spent;
+        spent
+    }
+
+    /// Colours the diff's hunks not coloured yet, within `budget`: the selected file's
+    /// first, then the files after it in the list's order (Tab's), wrapping. Returns
+    /// whether any is left (files not read yet wait for their diff, whose answer calls
+    /// this module again; past [`COLOURED_MAX`] none is).
+    fn background(&mut self, mut budget: usize) -> bool {
+        let repo = &mut self.repo;
+        if repo.coloured >= COLOURED_MAX {
+            return false;
+        }
+        let order: Vec<usize> = repo.tree.iter().filter_map(|n| if let tree::Kind::File(i) = n.kind { Some(i) } else { None }).collect();
+        let at = self.selected.as_ref().and_then(|p| order.iter().position(|&i| repo.files[i].path == *p)).unwrap_or(0);
+        for &i in order[at..].iter().chain(&order[..at]) {
+            let path = &repo.files[i].path;
+            if repo.coloured_files.contains(path) {
+                continue;
+            }
+            let Some(Ok(diff)) = repo.diffs.get(path) else { continue };
+            for (k, h) in diff.hunks.iter().enumerate() {
+                let tokens = repo.tokens.entry((path.clone(), k)).or_insert_with(|| highlight::HunkTokens::new(path, h));
+                if tokens.done() {
+                    continue;
+                }
+                if budget == 0 {
+                    return true;
+                }
+                let spent = tokens.parse(h, 0..h.lines.len(), budget);
+                repo.coloured += spent;
+                budget = budget.saturating_sub(spent);
+                if !tokens.done() {
+                    return true;
+                }
+            }
+            repo.coloured_files.insert(path.clone());
+        }
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -531,7 +851,7 @@ impl DiffMod {
         repo.stage = Stage::Resolving;
         if force {
             repo.diffs.clear();
-            repo.tokens.clear();
+            repo.uncolour();
             repo.version += 1;
             repo.stamp.clear();
         }
@@ -733,7 +1053,7 @@ impl DiffMod {
             repo.shown = Default::default();
             repo.files = files;
             repo.diffs.clear();
-            repo.tokens.clear();
+            repo.uncolour();
             repo.version += 1;
             repo.stamp = stamp;
         }
@@ -748,18 +1068,28 @@ impl DiffMod {
         Some(Ok(()))
     }
 
-    /// Takes in file diffs read, and asks for those shown: the selected file's; all
-    /// files, those whose rows are on screen or near it (a file not read yet is one
-    /// "reading…" row), never all of them. Runs queued for files gone from sight are
+    /// Takes in file diffs read, and asks for those shown first: the selected file's;
+    /// all files, those whose rows are on screen or near it (a file not read yet is one
+    /// "reading…" row). Then every file's, in one run ([`DiffMod::read_all`]), so a
+    /// scroll or a file switch finds it read. Runs queued for files gone from sight are
     /// dropped.
     fn read_diffs(&mut self) {
+        if let Some(r) = self.repo.got.remove("all") {
+            self.take_all(&r);
+        }
         let names: Vec<String> = self.repo.got.keys().filter(|k| k.starts_with("diff/")).cloned().collect();
         for name in names {
             if let Some(r) = self.repo.got.remove(&name) {
                 let path = name["diff/".len()..].to_owned();
-                self.repo.tokens.retain(|(p, _), _| *p != path);
-                self.repo.diffs.insert(path, answer(&r).map(|out| parse_diff(&out)));
-                self.repo.version += 1;
+                // Read with the whole range's diff meanwhile: kept.
+                if matches!(self.repo.diffs.get(&path), Some(Ok(_))) {
+                    continue;
+                }
+                let repo = &mut self.repo;
+                repo.tokens.retain(|(p, _), _| *p != path);
+                repo.coloured_files.remove(&path);
+                repo.diffs.insert(path, answer(&r).map(|out| parse_diff(&out)));
+                repo.version += 1;
             }
         }
         let mut wanted: Vec<usize> = self.selected_file().and_then(|f| self.repo.files.iter().position(|g| g.path == f.path)).into_iter().collect();
@@ -790,6 +1120,51 @@ impl DiffMod {
         for file in wanted {
             self.read_diff(&file);
         }
+        // Then every file's, in one run (the ones shown come first, on their own).
+        self.read_all();
+    }
+
+    /// Asks for the whole range's diff, every file's in one run, while some file's isn't
+    /// in (and the range isn't too big for that: then each is read as it's shown).
+    fn read_all(&mut self) {
+        let repo = &self.repo;
+        let lines: u32 = repo.files.iter().map(|f| f.added.unwrap_or(0).saturating_add(f.removed.unwrap_or(0))).fold(0, u32::saturating_add);
+        let missing = repo.files.iter().any(|f| f.status != '?' && !repo.diffs.contains_key(&f.path));
+        if !missing || lines > ALL_AT_ONCE_MAX || repo.asked.contains("all") {
+            return;
+        }
+        let Some(range) = repo.range.clone() else { return };
+        let revs = range.revs();
+        let mut args = vec!["diff", "-U3", "--no-color", "-M", "--end-of-options"];
+        args.extend(revs.iter().map(String::as_str));
+        args.push("--");
+        self.need("all", &args);
+    }
+
+    /// Takes in the whole range's diff: each file's part, for the files not read yet.
+    /// A part it can't tell the file of stays to be read on its own.
+    fn take_all(&mut self, r: &ToolResult) {
+        let Ok(out) = answer(r) else { return };
+        let cut = r.stderr.contains("output was cut");
+        let repo = &mut self.repo;
+        let mut took = false;
+        for (path, text) in split_diff(&out, cut) {
+            let Some(path) = path else { continue };
+            if repo.diffs.contains_key(&path) || !repo.files.iter().any(|f| f.path == path && f.status != '?') {
+                continue;
+            }
+            repo.diffs.insert(path, Ok(parse_diff(text)));
+            took = true;
+        }
+        if took {
+            repo.version += 1;
+        }
+        // Single reads queued for files now in: not needed.
+        let generation = self.generation;
+        self.queue.retain(|(id, _)| {
+            let path = id.strip_prefix(&format!("{generation}/diff/"));
+            !path.is_some_and(|p| repo.diffs.contains_key(p))
+        });
     }
 
     /// Asks for a file's diff, unless it's in, asked, or untracked.
@@ -835,8 +1210,12 @@ fn failure(r: &ToolResult) -> String {
 }
 
 export_frame!(DiffMod);
-// What it needs: the tab's folder, and git to read it with.
-manifest!(description: "what changed: uncommitted, unpushed, the branch, a commit", capabilities: ["window.folder", "git"]);
+// What it needs: the tab's folder, and git to read it with; a folder to keep its view
+// toggles in.
+manifest!(
+    description: "what changed: uncommitted, unpushed, the branch, a commit",
+    capabilities: ["window.folder", "git", "fs.read:~/.local/share/wasm-mods/diff", "fs.write:~/.local/share/wasm-mods/diff"]
+);
 
 // A plain Rust crate too: `cargo test` runs these natively.
 #[cfg(test)]
