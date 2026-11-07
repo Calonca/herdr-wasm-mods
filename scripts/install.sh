@@ -6,7 +6,8 @@
 # - the WASM mods to ${XDG_DATA_HOME:-~/.local/share}/wasm-mods/modules;
 # - the core mod (wasm-mods: the permissions screen, and any module by name) to herdr-app's
 #   mods folder, with a host.lock.json for this build. WITH_MODS=1 also installs every
-#   other WASM mod folder (<card>/mods/wasm-*/: wasm-todo, …), each with its module and
+#   other WASM mod folder (<card>/mods/wasm-*/ and modules/<module>/mods/wasm-*/: wasm-todo,
+#   wasm-git-graph, …), each with its module and
 #   a lock for this build.
 #   scripts/install.sh            everything built
 #   scripts/install.sh todo       one module (and the host and the core mod)
@@ -46,7 +47,7 @@ lock() {
   printf '{\n  "host": {"version": "%s", "protocol": [%s, %s], "files": {"%s-%s": {"url": "file://%s", "sha256": "%s", "size": %s}}, "source": null},\n  "module": %s\n}\n' \
     "$version" "$pmin" "$pmax" "$os" "$arch" "$hostdir/wasm-mods-host" "$sum" "$size" "$1"
 }
-for dir in "$root"/*/mods/wasm-*/; do
+for dir in "$root"/*/mods/wasm-*/ "$root"/modules/*/mods/wasm-*/; do
   dir=${dir%/}; name=$(basename "$dir")
   [ -f "$dir/main.js" ] || continue
   [ "$name" = wasm-mods ] || [ "${WITH_MODS:-}" = 1 ] || continue

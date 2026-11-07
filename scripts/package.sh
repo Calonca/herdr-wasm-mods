@@ -1,6 +1,7 @@
 #!/bin/sh
 # Readies the mod folders for a release, in place: each card's mod folder
-# (<card>/mods/wasm-*/) gets its module's .wasm and a host.lock.json pinning this
+# (<card>/mods/wasm-*/, and modules/<module>/mods/wasm-*/ for a mod that's in the release
+# but not in the gallery) gets its module's .wasm and a host.lock.json pinning this
 # release's host. Given mod folder names, only those are readied; the others are packed
 # as they are committed (their module and lock from an earlier release). Then packs
 # every mod folder into <hosts>/wasm-mods-X.Y.Z.tar.gz, writes <hosts>/SHA256SUMS, and writes THIRD-PARTY-LICENSES (the licences of the third-party
@@ -44,7 +45,7 @@ if [ -n "${SOURCE_GIT:-}" ]; then
 fi
 host="{\"version\": \"$version\", \"protocol\": [$pmin, $pmax], \"files\": {$files}, \"source\": $source}"
 pack=$(mktemp -d); trap 'rm -rf "$pack"' EXIT
-for dir in "$root"/*/mods/wasm-*/; do
+for dir in "$root"/*/mods/wasm-*/ "$root"/modules/*/mods/wasm-*/; do
   dir=${dir%/}; name=$(basename "$dir")
   [ -f "$dir/main.js" ] || continue
   if [ "$only" != "  " ] && [ "${only#* $name }" = "$only" ]; then

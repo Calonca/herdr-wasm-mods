@@ -9,12 +9,17 @@ A release is a tag `vX.Y.Z` with these files attached:
 - `THIRD-PARTY-LICENSES`: the licences of the third-party code built into the host and
   the modules, and of the syntax definitions in the diff module (MIT and Apache ask for
   their notices to ship with the binaries).
-- `wasm-mods-X.Y.Z.tar.gz`: the mod folders (`<card>/mods/wasm-*/`), each with its `.wasm`
-  and a `host.lock.json` that pins this release's host by URL and sha256.
+- `wasm-mods-X.Y.Z.tar.gz`: the mod folders (`<card>/mods/wasm-*/` and
+  `modules/<module>/mods/wasm-*/`), each with its `.wasm` and a `host.lock.json` that pins
+  this release's host by URL and sha256.
 
 The cards (`wasm-mods/`, `wasm-todo/`, `wasm-diff/`) are committed with those `.wasm` files
 and locks in them: Herdr's Mods gallery shows one card per top-level folder, with its
 `RECIPE.md` and `preview.png`, and installs its `mods/<name>/` as it is.
+
+`modules/git-graph/mods/wasm-git-graph/` is a mod folder with no card: it's committed and
+packed the same way, but it's in the tarball only, not in the gallery, so it has no recipe
+or preview. A top-level folder is a card, so a mod like that stays under `modules/`.
 
 A mod folder installs the host only when the person clicks Download (or Build from source)
 in its "WASM Mods core needed" panel; the download is checked against the pinned sha256

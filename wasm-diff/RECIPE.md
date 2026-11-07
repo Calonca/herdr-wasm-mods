@@ -71,7 +71,7 @@ it's shown on a machine without it, it offers to install it.
 - `diff.wasm`: the module, built from `modules/diff` with the `wasm-mods-sdk`
   crate for `wasm32-unknown-unknown`
   (`cargo build --release --target wasm32-unknown-unknown`). It's protocol 5.
-- `host.lock.json` pins host 0.2.2 (protocol 4 to 5), by URL and SHA-256 per
+- `host.lock.json` pins host 0.2.3 (protocol 4 to 5), by URL and SHA-256 per
   machine (`linux-x86_64`, `linux-aarch64`, `macos-aarch64`, `macos-x86_64`),
   and the module's own SHA-256 and protocol.
 - The module: `manifest!(description: "what changed: uncommitted, unpushed,

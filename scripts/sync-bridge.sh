@@ -1,13 +1,14 @@
 #!/bin/sh
 # Copies the core mod's wasm-bridge.js (wasm-mods/mods/wasm-mods/wasm-bridge.js, the one to
-# edit) into every other WASM mod folder (<card>/mods/wasm-*/). `--check`: change
+# edit) into every other WASM mod folder (<card>/mods/wasm-*/,
+# modules/<module>/mods/wasm-*/). `--check`: change
 # nothing, exit 1 if a copy differs.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 src="$root/wasm-mods/mods/wasm-mods/wasm-bridge.js"
 check=false; [ "${1:-}" = --check ] && check=true
 bad=0
-for dir in "$root"/*/mods/wasm-*/; do
+for dir in "$root"/*/mods/wasm-*/ "$root"/modules/*/mods/wasm-*/; do
   dir=${dir%/}
   [ -f "$dir/main.js" ] || continue
   [ "$dir/wasm-bridge.js" = "$src" ] && continue

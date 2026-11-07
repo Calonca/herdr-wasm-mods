@@ -114,10 +114,13 @@ bridge script (`wasm-bridge.js`), a `README.md` and a `host.lock.json`. The
 lock pins the host it needs: its version and, for each machine, the download
 URL and its SHA-256. A mod folder works wherever you copy it.
 
+`wasm-git-graph` has no card and isn't in the gallery: it comes in the release's
+tarball (its folder here is `modules/git-graph/mods/wasm-git-graph/`).
+
 1. Add a card from Herdr's gallery, or copy `<card>/mods/<name>/` into
    herdr-app's `mods/` (`~/.config/herdr-app/mods/`, or
    `$HERDR_APP_HOME/mods/`). The release's `wasm-mods-<version>.tar.gz` holds the
-   same mod folders. Then check each one:
+   same mod folders, and `wasm-git-graph`. Then check each one:
    `herdr-app check ~/.config/herdr-app/mods/wasm-todo`.
 2. Show one: `herdr-app do tab.new '{"mod": "wasm-todo"}'`, or put it in a
    layout block: `{"content": {"mod": "wasm-diff"}}`.
@@ -224,10 +227,15 @@ is made.
   `~/.local/share/wasm-mods/diff/settings.json`. Asks for `window.folder`,
   `git`, and to read and change files in that folder.
 
-`modules/` also holds the sources of two modules that aren't released as mods:
+- **git graph** (`wasm-git-graph`, in the release's tarball, not in the gallery):
+  the tab's repo as a commit graph, every branch and tag. Enter shows a commit's
+  message and files, Space its diff (with `wasm-diff`). Whether the details show
+  is kept in `~/.local/share/wasm-mods/git-graph/settings.json`. Asks for
+  `window.folder`, `git`, and to read and change files in that folder.
+
+`modules/` also holds the source of a module that isn't released as a mod:
 `hello` (a counter and a canvas, no capabilities: the template for new
-modules) and `git-graph` (a commit graph, an example of `git` and canvases; it
-keeps whether its details show in `~/.local/share/wasm-mods/git-graph/`).
+modules).
 
 ## Write your own module
 
@@ -292,7 +300,9 @@ The bridge's own tests:
 - `crates/wasm-mods-protocol`: what the host and a module exchange.
 - `crates/wasm-mods-sdk`: the Rust SDK for modules.
 - `crates/wasm-mods-host`: the host.
-- `modules/`: the modules (their own workspace, built for wasm32).
+- `modules/`: the modules (their own workspace, built for wasm32), and
+  `git-graph/mods/wasm-git-graph`, the mod folder that's in the release but has
+  no card.
 - `wasm-mods/`, `wasm-todo/`, `wasm-diff/`: the cards, one per mod: a
   recipe, a preview, and the mod folder (`mods/<name>/`) with the release's
   module and lock.
